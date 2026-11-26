@@ -111,6 +111,51 @@ public class OpenMWActivity extends SDLActivity {
         super.loadLibraries();
     }
 
+
+    /**
+     * Dark Messiah data built by the desktop importer. The engine reads it from the user-data directory
+     * (dm-assets/<recipe>/); that directory is app-private on the headset, so adb cannot fill it. Stage the
+     * import at /sdcard/Morrowind/dm-assets/<recipe>/ and it is copied in here when missing.
+     */
+    private void syncDarkMessiahData() {
+        try {
+            File base = new File(Environment.getExternalStorageDirectory(), "Morrowind/dm-assets");
+            File[] recipes = base.listFiles();
+            if (recipes == null)
+                return;
+            for (File recipe : recipes) {
+                File marker = new File(recipe, "dm-import-ready.json");
+                File dst = new File(new File(userStorage, "dm-assets"), recipe.getName());
+                if (!marker.isFile() || new File(dst, "dm-import-ready.json").isFile())
+                    continue;
+                Log.i("OpenMW", "Copying Dark Messiah data " + recipe + " -> " + dst);
+                copyTree(recipe, dst);
+                copyTree(marker, new File(dst, "dm-import-ready.json"));
+            }
+        } catch (Exception e) {
+            Log.w("OpenMW", "Dark Messiah data sync failed: " + e);
+        }
+    }
+
+    private void copyTree(File src, File dst) throws Exception {
+        if (src.isDirectory()) {
+            dst.mkdirs();
+            File[] kids = src.listFiles();
+            if (kids != null)
+                for (File k : kids)
+                    if (!k.getName().equals("dm-import-ready.json"))
+                        copyTree(k, new File(dst, k.getName()));
+            return;
+        }
+        dst.getParentFile().mkdirs();
+        try (InputStream in = new java.io.FileInputStream(src); OutputStream out = new FileOutputStream(dst)) {
+            byte[] buf = new byte[1 << 16];
+            int n;
+            while ((n = in.read(buf)) > 0)
+                out.write(buf, 0, n);
+        }
+    }
+
     private File globalConfigDir() { return new File(getFilesDir(), "config"); }
     private File resourcesDir()    { return new File(getFilesDir(), "resources"); }
 
@@ -175,6 +220,7 @@ public class OpenMWActivity extends SDLActivity {
         writeFile(new File(globalConfigDir(), "openmw.cfg"), global.toString());
 
         // User config: every existing data dir + the game files found across them.
+        syncDarkMessiahData();
         File userCfgDir = new File(userStorage, "config");
         userCfgDir.mkdirs();
         new File(userStorage, "data").mkdirs(); // ensure the app-scoped fallback exists
