@@ -40,6 +40,7 @@
 #include "../mwbase/world.hpp"
 
 #include "actorutil.hpp"
+#include "jiggleautorig.hpp"
 #include "postprocessor.hpp"
 #include "renderbin.hpp"
 #include "renderingmanager.hpp"
@@ -515,7 +516,9 @@ namespace MWRender
             smodel = Misc::ResourceHelpers::correctActorModelPath(model, mResourceSystem->getVFS());
         }
 
-        setObjectRoot(smodel, true, true, false);
+        // Body jiggle is female-only. Which females jiggle (the player and listed NPCs) is decided per
+        // bone in attachJiggleBoneControllers(); this also lets Verlet cloth chains attach for everyone.
+        setObjectRoot(smodel, true, true, false, isFemale);
 
         updateParts();
 
@@ -684,6 +687,15 @@ namespace MWRender
 
         if (wasArrowAttached)
             attachArrow();
+
+        // Unequipped parts may have left their Verlet cloth chains in the skeleton; drop unused ones.
+        pruneUnusedEquipmentBones();
+
+        // Run model-specific secondary-motion compatibility for every actor after equipment
+        // attachment. Female body auto-rigging is still explicitly gated by sex.
+        const std::string actorDisplayName = std::string(mPtr.getClass().getName(mPtr));
+        JiggleAutoRig::run(mObjectRoot.get(), mPtr == MWMechanics::getPlayer(), !mNpc->isMale(), actorDisplayName,
+            mPtr.getCellRef().getRefNum());
     }
 
     PartHolderPtr NpcAnimation::insertBoundedPart(VFS::Path::NormalizedView model, std::string_view bonename,

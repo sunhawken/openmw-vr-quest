@@ -1,7 +1,6 @@
 #ifndef XR_SESSION_HPP
 #define XR_SESSION_HPP
 
-#include <atomic>
 #include <mutex>
 
 #include <components/vr/constants.hpp>
@@ -37,9 +36,6 @@ namespace XR
 
         XrSession xrSession() { return mXrSession; }
 
-        /// xrDestroySession also destroys the session's spaces: wrappers that outlive it must not destroy theirs.
-        static bool xrSessionDestroyed();
-
         std::array<Stereo::View, 2> locateViews(int64_t predictedDisplayTime, VR::Space& reference) override;
 
         VR::TrackingPose locateSpace(XrSpace space, XrSpace referenceSpace) const;
@@ -47,7 +43,6 @@ namespace XR
         void setReferenceWorldPose(Stereo::Pose pose) override;
 
         std::array<VR::SwapchainConfig, 2> getRecommendedSwapchainConfig() const override;
-        bool runtimeLost() const override { return mRuntimeLost; }
         std::shared_ptr<VR::Space> getReferenceSpace(VR::ReferenceSpace space) override;
         XrSpace createReferenceSpace(VR::ReferenceSpace reference, Stereo::Pose pose);
 
@@ -66,8 +61,6 @@ namespace XR
         void popEvent();
         bool handleSessionStateChanged(const XrEventDataSessionStateChanged& stateChangedEvent);
         bool checkStopCondition();
-        //! Remembers a lost instance/session so the frame loop stops calling into the runtime.
-        void checkRuntimeLost(XrResult result);
 
         void xrInteractionProfileChanged();
 
@@ -103,7 +96,6 @@ namespace XR
         bool mXrSessionShouldStop = false;
         bool mAppShouldSyncFrameLoop = false;
         bool mAppShouldReadInput = false;
-        std::atomic<bool> mRuntimeLost{ false };
 
         bool mMSFTReprojectionModeDepth = false;
     };

@@ -20,7 +20,7 @@ namespace XR
 
     Action::~Action()
     {
-        if (mXrAction && !Instance::xrInstanceDestroyed())
+        if (mXrAction)
         {
             CHECK_XRCMD(xrDestroyAction(mXrAction));
         }

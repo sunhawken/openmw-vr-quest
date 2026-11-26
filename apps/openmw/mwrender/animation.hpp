@@ -243,6 +243,10 @@ namespace MWRender
 
         osg::ref_ptr<RotateController> addRotateController(std::string_view bone);
 
+        /// Scans this actor's skeleton for jiggle bones and Verlet cloth chains and attaches controllers to them.
+        /// Idempotent; the controllers live on nodes owned by mObjectRoot so they are destroyed with it.
+        void attachJiggleBoneControllers();
+
         bool mHasMagicEffects;
 
         osg::ref_ptr<SceneUtil::LightSource> mGlowLight;
@@ -294,7 +298,8 @@ namespace MWRender
          *      (useful for NPCs, where only the skeleton is needed for the root, and the actual NPC parts are then
          * assembled from separate files).
          */
-        void setObjectRoot(const std::string& model, bool forceskeleton, bool baseonly, bool isCreature);
+        void setObjectRoot(
+            const std::string& model, bool forceskeleton, bool baseonly, bool isCreature, bool enableJiggleBones = false);
 
         void loadAdditionalAnimations(VFS::Path::NormalizedView model, const std::string& baseModel);
 

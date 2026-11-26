@@ -4,7 +4,10 @@
 #include <osg/Geometry>
 #include <osg/Matrixf>
 
+#include <cstddef>
+#include <string>
 #include <string_view>
+#include <vector>
 
 namespace SceneUtil
 {
@@ -61,6 +64,16 @@ namespace SceneUtil
         void setRootBone(std::string_view name);
 
         osg::ref_ptr<osg::Geometry> getSourceGeometry() const;
+
+        std::vector<std::string> getInfluenceBoneNames() const;
+        std::vector<BoneInfo> getBoneInfoList() const;
+        std::vector<BoneWeights> getPerVertexInfluences(std::size_t vertexCount) const;
+        /// Forget resolved skeleton/bone pointers so they are re-resolved on the next cull.
+        void reinitialize();
+        /// Gives this geometry its own copy of the influence data (copies share it with the cached template).
+        void makeInfluenceDataUnique();
+        /// Jiggle seam fix: feather jiggle-bone weights to zero near open-edge boundaries and renormalize.
+        void applyJiggleSeamFeather(float distance);
 
         void accept(osg::NodeVisitor& nv) override;
         bool supports(const osg::PrimitiveFunctor&) const override { return true; }
