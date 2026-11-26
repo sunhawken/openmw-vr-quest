@@ -25,15 +25,11 @@ namespace Settings
         SettingValue<bool> mShowMeleeInfo{ mIndex, "Game", "show melee info" };
         SettingValue<bool> mShowEnchantChance{ mIndex, "Game", "show enchant chance" };
         SettingValue<bool> mBestAttack{ mIndex, "Game", "best attack" };
-        SettingValue<bool> mMouseDirectionalAttack{ mIndex, "Game", "mouse directional attack" };
-        SettingValue<bool> mMouseDirectionalAttackInvert{ mIndex, "Game", "mouse directional attack invert" };
         SettingValue<int> mDifficulty{ mIndex, "Game", "difficulty", makeClampSanitizerInt(-500, 500) };
         // We have to cap it since using high values (larger than 7168) will make some quests harder or impossible to
         // complete (bug #1876)
         SettingValue<int> mActorsProcessingRange{ mIndex, "Game", "actors processing range",
             makeClampSanitizerInt(3584, 7168) };
-        SettingValue<float> mActorAnimationLodDistance{ mIndex, "Game", "actor animation lod distance",
-            makeMaxSanitizerFloat(0) };
         SettingValue<bool> mClassicReflectedAbsorbSpellsBehavior{ mIndex, "Game",
             "classic reflected absorb spells behavior" };
         SettingValue<bool> mClassicCalmSpellsBehavior{ mIndex, "Game", "classic calm spells behavior" };
@@ -80,9 +76,7 @@ namespace Settings
             "actor collision shape type" };
         SettingValue<bool> mPlayerMovementIgnoresAnimation{ mIndex, "Game", "player movement ignores animation" };
         // Use optional player-only Curvy Body equipment meshes when present in the VFS.
-        SettingValue<bool> mCurvyBodyMeshes{ mIndex, "Game", "curvy body meshes" };
         // Use optional player-only naked female BBR body mesh when fully unequipped.
-        SettingValue<bool> mCurvyNakedBody{ mIndex, "Game", "curvy naked body" };
         SettingValue<bool> mJiggleBoneDebug{ mIndex, "Game", "jiggle bone debug" };
 
         // Master switch for the physics-verlet hair/cloth chains.
@@ -214,7 +208,6 @@ namespace Settings
         // injects into plugins with its own default value) is dropped when a plugin re-adds it
         // with that exact evil value, so the base game/expansion value is preserved. GMSTs a mod
         // intentionally changed to a different value are kept.
-        SettingValue<bool> mCleanPlugins{ mIndex, "Game", "clean plugins" };
     };
 }
 
