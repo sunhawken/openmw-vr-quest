@@ -108,6 +108,12 @@ namespace Nif
             return (major << 24) + (minor << 16) + (patch << 8) + rev;
         }
 
+        // Absolute offset of the next byte to be read; lets records support safe in-place edits of loose NIFs.
+        std::size_t getPosition() const
+        {
+            return mStreamSize - static_cast<std::size_t>(Files::getStreamSizeLeft(*mStream));
+        }
+
         void skip(size_t size) { mStream->ignore(size); }
 
         /// Read into a single instance of type

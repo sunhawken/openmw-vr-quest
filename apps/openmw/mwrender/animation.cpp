@@ -1990,6 +1990,7 @@ namespace MWRender
             node->addUpdateCallback(
                 new JiggleBoneController(debug, isPlayer, actorName, mPtr.getCellRef().getRefNum()));
         }
+    }
 
     osg::Group* Animation::getObjectRoot()
     {

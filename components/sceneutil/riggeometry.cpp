@@ -1,6 +1,7 @@
 #include "riggeometry.hpp"
 
 #include <osg/MatrixTransform>
+#include <osg/TriangleIndexFunctor>
 
 #include <osgUtil/CullVisitor>
 

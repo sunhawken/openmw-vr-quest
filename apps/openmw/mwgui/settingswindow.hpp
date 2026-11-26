@@ -109,8 +109,6 @@ namespace MWGui
         MyGUI::Button* mJiggleDisableNpcButton;
         MyGUI::Button* mJiggleClearNpcRuleButton;
 
-        MyGUI::ComboBox* mShadowResolution;
-        MyGUI::ComboBox* mShadowUpdateInterval;
 
         MyGUI::ComboBox* mPrimaryLanguage;
         MyGUI::ComboBox* mSecondaryLanguage;
@@ -181,9 +179,6 @@ namespace MWGui
         void onJiggleClearNpcRuleClicked(MyGUI::Widget* sender);
         void refreshJiggleAdvancedPanel();
         void onMaxLightsChanged(MyGUI::ComboBox* sender, size_t pos);
-
-        void onShadowResolutionChanged(MyGUI::ComboBox* sender, size_t pos);
-        void onShadowUpdateIntervalChanged(MyGUI::ComboBox* sender, size_t pos);
 
         void onPrimaryLanguageChanged(MyGUI::ComboBox* sender, size_t pos) { onLanguageChanged(0, sender, pos); }
         void onSecondaryLanguageChanged(MyGUI::ComboBox* sender, size_t pos) { onLanguageChanged(1, sender, pos); }
