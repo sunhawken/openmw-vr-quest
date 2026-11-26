@@ -233,6 +233,24 @@ public class OpenMWActivity extends SDLActivity {
                 present.add(d);
             }
         }
+        // An explicit load order staged next to the data (generated from the desktop openmw.cfg) wins:
+        // /sdcard/Morrowind/content-list.txt (+ archive-list.txt, groundcover-list.txt, fallback.cfg).
+        File listDir = new File(Environment.getExternalStorageDirectory(), "Morrowind");
+        java.util.List<String> contentList = readList(new File(listDir, "content-list.txt"));
+        if (!contentList.isEmpty()) {
+            for (String bsa : readList(new File(listDir, "archive-list.txt")))
+                sb.append("fallback-archive=").append(bsa).append('
+');
+            for (String c : contentList)
+                sb.append("content=").append(c).append('
+');
+            for (String g : readList(new File(listDir, "groundcover-list.txt")))
+                sb.append("groundcover=").append(g).append('
+');
+            for (String f : readList(new File(listDir, "fallback.cfg")))
+                sb.append(f).append('
+');
+        } else {
         // BSA archives hold Morrowind's meshes/textures/UI assets; without fallback-archive=
         // entries the world renders black. Register every .bsa found (base game first).
         for (String bsa : detect(present, new String[] { ".bsa" },
@@ -241,6 +259,7 @@ public class OpenMWActivity extends SDLActivity {
         for (String esm : detect(present, new String[] { ".esm", ".omwgame", ".esp", ".omwaddon" },
                 new String[] { "Morrowind.esm", "Tribunal.esm", "Bloodmoon.esm" }))
             sb.append("content=").append(esm).append('\n');
+        }
         writeFile(new File(userCfgDir, "openmw.cfg"), sb.toString());
         Log.i(TAG, "openmw.cfg data dirs: " + present);
 
@@ -253,6 +272,23 @@ public class OpenMWActivity extends SDLActivity {
         if (!existing.contains("[Fog]"))
             writeFile(userSettings,
                     existing + "\n[Fog]\nradial fog = true\nsky blending = true\n");
+    }
+
+    private java.util.List<String> readList(File f) {
+        java.util.ArrayList<String> out = new java.util.ArrayList<>();
+        try {
+            if (!f.isFile())
+                return out;
+            for (String line : readFile(f).split("
+")) {
+                String s = line.replace("", "").trim();
+                if (!s.isEmpty())
+                    out.add(s);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "could not read " + f + ": " + e);
+        }
+        return out;
     }
 
     /** Files with any of the given extensions across all data dirs, deduped, known names first. */
