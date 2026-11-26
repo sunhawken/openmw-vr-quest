@@ -430,7 +430,7 @@ set(LUAJIT_MAKE_FLAGS
 )
 
 ExternalProject_Add(luajit
-	GIT_REPOSITORY https://luajit.org/git/luajit.git
+	GIT_REPOSITORY https://github.com/LuaJIT/LuaJIT.git
 	GIT_TAG ${LUAJIT_VERSION}
 	DOWNLOAD_DIR ${download_dir}
 
