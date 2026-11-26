@@ -32,6 +32,20 @@ namespace Settings
         SettingValue<bool> mGmstOverridesL10n{ mIndex, "General", "gmst overrides l10n" };
         SettingValue<std::size_t> mLogBufferSize{ mIndex, "General", "log buffer size" };
         SettingValue<std::size_t> mConsoleHistoryBufferSize{ mIndex, "General", "console history buffer size" };
+        // Cap the resolution of mipmapped textures at load time by skipping the top mip level(s)
+        // (no resampling), to save VRAM (ported concept from TextureDownscaler). Max width/height
+        // in pixels; 0 disables.
+        // Per-type caps identified by filename suffix. 0 = use the general "texture downscale" value.
+        // Normal maps: _n, _nm, _msn, _normal.
+        // Glow/emissive maps: _g, _glow, _e, _em.
+        // Parallax/height maps: _p, _h, _parallax, _height.
+        // Material/specular maps: _rmaos, _m, _material, _s, _spec, _specular.
+        // Per-folder overrides that take precedence over the type caps: a comma-separated list of
+        // "path prefix=maxpx" rules (e.g. "textures/tr/=2048, textures/ui/=0"). The longest matching
+        // prefix wins; a rule value of 0 leaves that folder's textures at full size.
+        SettingValue<std::vector<std::string>> mTextureDownscaleFolderRules{ mIndex, "General",
+            "texture downscale folder rules" };
+        // Log each texture that gets downscaled (throttled to Debug::Verbose).
     };
 }
 

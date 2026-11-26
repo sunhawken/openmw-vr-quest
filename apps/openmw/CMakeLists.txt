@@ -18,7 +18,7 @@ set(OPENMW_HEADERS
 source_group(apps/openmw FILES main.cpp androidmain.cpp ${OPENMW_SOURCES} ${OPENMW_HEADERS} ${OPENMW_RESOURCES})
 
 add_openmw_dir (mwrender
-    actors objects renderingmanager animation rotatecontroller sky skyutil npcanimation esm4npcanimation vismask
+    actors objects renderingmanager animation rotatecontroller jigglebonecontroller jiggleglute verletclothcontroller jiggleautorig sky skyutil npcanimation esm4npcanimation vismask
     creatureanimation effectmanager util renderinginterface pathgrid rendermode weaponanimation screenshotmanager
     bulletdebugdraw globalmap characterpreview camera localmap water terrainstorage ripplesimulation
     renderbin actoranimation landmanager navmesh actorspaths recastmesh fogmanager objectpaging groundcover
@@ -33,9 +33,9 @@ add_openmw_dir (mwinput
 
 add_openmw_dir (mwgui
     layout textinput widgets race class birth review windowmanagerimp console dialogue
-    windowbase statswindow messagebox journalwindow charactercreation
+    windowbase statswindow messagebox journalwindow charactercreation appearancetab
     mapwindow windowpinnablebase tooltips scrollwindow bookwindow resourceskin
-    formatting inventorywindow container hud countdialog tradewindow settingswindow
+    formatting inventorywindow container hud countdialog tradewindow settingswindow jiggleretargetpanel jigglenpclist
     confirmationdialog alchemywindow referenceinterface spellwindow mainmenu quickkeysmenu
     itemselection spellbuyingwindow loadingscreen levelupdialog waitdialog spellcreationdialog
     enchantingdialog trainingwindow travelwindow exposedwindow cursor spellicons

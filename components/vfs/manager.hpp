@@ -5,6 +5,7 @@
 
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -70,6 +71,10 @@ namespace VFS
         std::filesystem::file_time_type getLastModified(VFS::Path::NormalizedView name) const;
         // Equivalent to std::filesystem::path::stem. The result isn't normalized.
         std::string getStem(VFS::Path::NormalizedView name) const;
+
+        /// Path of a resource that comes from a loose filesystem archive. Resources inside BSAs have no
+        /// safe writable path and return std::nullopt.
+        std::optional<std::filesystem::path> getPhysicalPath(Path::NormalizedView name) const;
 
     private:
         std::vector<std::unique_ptr<Archive>> mArchives;

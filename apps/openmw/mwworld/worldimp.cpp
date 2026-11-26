@@ -31,6 +31,7 @@
 
 #include <components/misc/constants.hpp>
 #include <components/misc/convert.hpp>
+#include <components/misc/jigglepolicy.hpp>
 #include <components/misc/mathutil.hpp>
 #include <components/misc/pathhelpers.hpp>
 #include <components/misc/resourcehelpers.hpp>
@@ -376,6 +377,7 @@ namespace MWWorld
         mWorldModel.clear();
 
         mStore.clearDynamic();
+        Misc::JigglePolicy::overrides().clear();
 
         if (mPlayer)
         {
@@ -3836,13 +3838,15 @@ namespace MWWorld
         return result.mRatio * maxDistance;
     }
 
-    MWWorld::Ptr World::placeObject(const MWWorld::ConstPtr& object, const MWRender::RayResult& ray, int amount)
+    MWWorld::Ptr World::placeObject(const MWWorld::Ptr& object, const MWRender::RayResult& ray, int amount, bool copy)
     {
         CellStore* cell = getPlayerPtr().getCell();
 
         ESM::Position pos = getPlayerPtr().getRefData().getPosition();
 
-        if (ray.mHit && !ray.mHitObject.isEmpty())
+        // Anything the ray hit is a place to put it: terrain and statics have no Ptr of their own, and requiring one
+        // put items dropped on the ground at the player's position instead of where the pointer was.
+        if (ray.mHit)
         {
             pos.pos[0] = ray.mHitPointWorld.x();
             pos.pos[1] = ray.mHitPointWorld.y();
@@ -3853,8 +3857,10 @@ namespace MWWorld
         pos.rot[0] = 0;
         pos.rot[1] = 0;
 
-        // copy the object and set its count
-        MWWorld::Ptr dropped = copyObjectToCell(object, cell, pos, amount, true);
+        // copy the object and set its count, or move it when it's the whole stack (keeps its RefNum, like the desktop
+        // drop does)
+        MWWorld::Ptr dropped
+            = copy ? copyObjectToCell(object, cell, pos, amount, true) : moveObjectToCell(object, cell, pos, true);
 
         // only the player place items in the world, so no need to check actor
         PCDropped(dropped);
