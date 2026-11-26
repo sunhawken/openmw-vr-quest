@@ -44,13 +44,44 @@ It captures the startup log to `android/omw-device.log` (filtered to OpenMW/SDL/
 
 ## Build
 
+The Quest build was produced in Ubuntu under WSL2. It targets `arm64-v8a`, uses
+the Android NDK downloaded by `build.sh`, and packages with Gradle 8.7.
+
+### Prerequisites
+
+Install a current Ubuntu WSL2 distribution and the Android SDK command-line tools.
+`ANDROID_HOME` must point to an SDK containing Build Tools, Platform Tools, and
+Android Platform 35. The build host also needs the usual native build tools:
+
+```sh
+sudo apt update
+sudo apt install -y build-essential cmake ninja-build git curl unzip zip \
+  autoconf automake libtool pkg-config python3 openjdk-17-jdk ccache
+sdkmanager 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0'
+```
+
+Set the SDK location before building (adjust it if your SDK is elsewhere):
+
+```sh
+export ANDROID_HOME="$HOME/Android/Sdk"
+export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+```
+
+### Build the Quest 3 APK
+
 ```sh
 cd android/buildscripts
 ./build.sh            # downloads the NDK, builds deps + libopenmw.so, deploys into app/
 cd ..
-ANDROID_HOME=$HOME/Android/Sdk ./gradlew :app:assembleDebug
-adb install -r app/build/outputs/apk/debug/app-debug.apk
+./gradlew :app:assembleDebug
+cp app/build/outputs/apk/debug/app-debug.apk ../OpenMW-VR-Quest3-debug.apk
 ```
+
+`build.sh` enables `ccache` by default, so subsequent native builds reuse compiled
+objects. Set `CCACHE=false` only when a completely uncached compilation is needed.
+The resulting APK is `OpenMW-VR-Quest3-debug.apk`; it is arm64-only and intended
+for Meta Quest 3. The APK is deliberately not versioned in Git because it is about
+1 GB—publish it as a GitHub Release asset instead.
 
 * Morrowind.
 * Dark Messiah of Might and Magic, for its animations, sounds and effects. Without it the game runs

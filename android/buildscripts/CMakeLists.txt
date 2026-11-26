@@ -540,6 +540,9 @@ set(OPENMW_COMMON
 	-DRUN_RESULT_VAR=0
 	-DRUN_RESULT_VAR__TRYRUN_OUTPUT=
 	-DBUILD_PHYSICSOBJECTTOOL=0
+	# This developer-side tool is not used by the Quest APK. On Android it is
+	# built as a shared library and needs liblog, but does not link it itself.
+	-DBUILD_NAVMESHTOOL=0
 	-DBUILD_BSATOOL=0
 	-DBUILD_NIFTEST=0
 	-DBUILD_ESMTOOL=0

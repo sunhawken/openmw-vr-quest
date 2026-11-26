@@ -239,17 +239,13 @@ public class OpenMWActivity extends SDLActivity {
         java.util.List<String> contentList = readList(new File(listDir, "content-list.txt"));
         if (!contentList.isEmpty()) {
             for (String bsa : readList(new File(listDir, "archive-list.txt")))
-                sb.append("fallback-archive=").append(bsa).append('
-');
+                sb.append("fallback-archive=").append(bsa).append('\n');
             for (String c : contentList)
-                sb.append("content=").append(c).append('
-');
+                sb.append("content=").append(c).append('\n');
             for (String g : readList(new File(listDir, "groundcover-list.txt")))
-                sb.append("groundcover=").append(g).append('
-');
+                sb.append("groundcover=").append(g).append('\n');
             for (String f : readList(new File(listDir, "fallback.cfg")))
-                sb.append(f).append('
-');
+                sb.append(f).append('\n');
         } else {
         // BSA archives hold Morrowind's meshes/textures/UI assets; without fallback-archive=
         // entries the world renders black. Register every .bsa found (base game first).
@@ -279,9 +275,8 @@ public class OpenMWActivity extends SDLActivity {
         try {
             if (!f.isFile())
                 return out;
-            for (String line : readFile(f).split("
-")) {
-                String s = line.replace("", "").trim();
+            for (String line : readFile(f).split("\n")) {
+                String s = line.replace("\r", "").trim();
                 if (!s.isEmpty())
                     out.add(s);
             }
