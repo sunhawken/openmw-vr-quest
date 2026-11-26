@@ -1,4 +1,5 @@
 #include "renderingmanager.hpp"
+#include "swordsegmentintersector.hpp"
 
 #include <cstdlib>
 #include <limits>
@@ -8,6 +9,8 @@
 #include <osg/Group>
 #include <osg/Light>
 #include <osg/Material>
+#include <osg/NodeCallback>
+#include <osg/observer_ptr>
 #include <osg/Matrix>
 #include <osg/UserDataContainer>
 
@@ -34,8 +37,11 @@
 #include <components/sceneutil/cullsafeboundsvisitor.hpp>
 #include <components/sceneutil/depth.hpp>
 #include <components/sceneutil/lightmanager.hpp>
+#include <components/sceneutil/occlusionculling.hpp>
+#include <components/occlusionculling/occlusionstorage.hpp>
 #include <components/sceneutil/positionattitudetransform.hpp>
 #include <components/sceneutil/shadow.hpp>
+#include <components/sceneutil/skeleton.hpp>
 #include <components/sceneutil/stateupdater.hpp>
 #include <components/sceneutil/visitor.hpp>
 #include <components/sceneutil/workqueue.hpp>
@@ -43,8 +49,10 @@
 
 #include <components/misc/constants.hpp>
 
+
 #include <components/terrain/quadtreeworld.hpp>
 #include <components/terrain/terraingrid.hpp>
+#include <components/terrain/terrainoccluder.hpp>
 
 #include <components/esm3/loadcell.hpp>
 #include <components/esm4/loadcell.hpp>
@@ -74,6 +82,7 @@
 #include "navmesh.hpp"
 #include "npcanimation.hpp"
 #include "objectpaging.hpp"
+#include "occlusionculling.hpp"
 #include "pathgrid.hpp"
 #include "postprocessor.hpp"
 #include "recastmesh.hpp"
@@ -94,6 +103,26 @@
 //## VR_PATCH END
 namespace MWRender
 {
+    class SwordClinchPoseCallback : public osg::NodeCallback
+    {
+        osg::observer_ptr<NpcAnimation> mOwner;
+    public:
+        explicit SwordClinchPoseCallback(NpcAnimation* owner) : mOwner(owner) {}
+        void operator()(osg::Node* node, osg::NodeVisitor* visitor) override
+        {
+            osg::ref_ptr<NpcAnimation> owner;
+            const bool update = visitor && visitor->getVisitorType() == osg::NodeVisitor::UPDATE_VISITOR
+                && mOwner.lock(owner);
+            if (update)
+                owner->restoreTransientPose();
+            traverse(node, visitor);
+            // Both participants now have this frame's complete animated transforms.
+            // RigGeometry skins during CULL, so this fit affects the same frame.
+            if (update)
+                owner->fitSwordClinchPose(*visitor);
+        }
+    };
+
     class PreloadCommonAssetsWorkItem : public SceneUtil::WorkItem
     {
     public:
@@ -152,6 +181,8 @@ namespace MWRender
         , mGroundCoverStore(groundcoverStore)
     {
         bool reverseZ = SceneUtil::AutoDepth::isReversed();
+
+        SceneUtil::Skeleton::setUpdateLodDistance(Settings::game().mActorAnimationLodDistance);
 
         resourceSystem->getSceneManager()->setParticleSystemMask(MWRender::Mask_ParticleSystem);
         resourceSystem->getSceneManager()->setAutoUseNormalMaps(Settings::shaders().mAutoUseObjectNormalMaps);
@@ -271,6 +302,47 @@ namespace MWRender
         mTerrain = chunkMgr.mTerrain.get();
         mGroundcover = chunkMgr.mGroundcover.get();
         mObjectPaging = chunkMgr.mObjectPaging.get();
+
+        if (Settings::camera().mOcclusionCulling)
+        {
+            // Path is set later via setOcclusionCachePath() called from World::init().
+            // Create a no-op placeholder so get() safely returns false until then.
+            mOcclusionStorage = std::make_unique<OcclusionStorage>("");
+
+            const int bufW = Settings::camera().mOcclusionBufferWidth;
+            const int bufH = Settings::camera().mOcclusionBufferHeight;
+            mOcclusionCuller = new SceneUtil::OcclusionCuller(bufW, bufH);
+
+            const float cellWorldSize = Constants::CellSizeInUnits;
+            mTerrainOccluder = std::make_unique<Terrain::TerrainOccluder>(mTerrainStorage.get(), cellWorldSize);
+            mTerrainOccluder->setWorldspace(ESM::Cell::sDefaultWorldspaceId);
+            mTerrainOccluder->setLodLevel(Settings::camera().mOcclusionTerrainLod);
+
+            const int radius = Settings::camera().mOcclusionTerrainRadius;
+            const bool enableTerrain = Settings::camera().mOcclusionCullingTerrain;
+            const bool debugOverlay = Settings::camera().mOcclusionDebugOverlay;
+            const bool debugMessages = Settings::camera().mOcclusionDebugMessages;
+            const bool enableInteriors = Settings::camera().mOcclusionCullingInteriors;
+            const unsigned int maxTriangles = static_cast<unsigned int>(Settings::camera().mOcclusionMaxTriangles);
+            mSceneOcclusionCallback = new SceneOcclusionCallback(
+                mOcclusionCuller, mTerrainOccluder.get(), radius, enableTerrain, debugOverlay, debugMessages,
+                enableInteriors, mOcclusionStorage.get());
+            sceneRoot->addCullCallback(mSceneOcclusionCallback);
+
+            const float occluderMinRadius = Settings::camera().mOcclusionOccluderMinRadius;
+            const float occluderMaxRadius = Settings::camera().mOcclusionOccluderMaxRadius;
+            const float occluderShrinkFactor = Settings::camera().mOcclusionOccluderShrinkFactor;
+            const int occluderMeshRes = Settings::camera().mOcclusionOccluderMeshResolution;
+            const int occluderMaxMeshRes = Settings::camera().mOcclusionOccluderMaxMeshResolution;
+            const float occluderInsideThreshold = Settings::camera().mOcclusionOccluderInsideThreshold;
+            const float occluderMaxDistance = Settings::camera().mOcclusionOccluderMaxDistance;
+            const bool enableStatics = Settings::camera().mOcclusionCullingStatics;
+            mObjects->setOcclusionCuller(mOcclusionCuller, occluderMinRadius, occluderMaxRadius, occluderShrinkFactor,
+                occluderMeshRes, occluderMaxMeshRes, occluderInsideThreshold, occluderMaxDistance, enableStatics,
+                maxTriangles, mOcclusionStorage.get());
+            if (mObjectPaging)
+                mObjectPaging->setOcclusionCuller(mOcclusionCuller, maxTriangles);
+        }
 
         mStateUpdater = new SceneUtil::StateUpdater();
         sceneRoot->addUpdateCallback(mStateUpdater);
@@ -560,6 +632,13 @@ namespace MWRender
             enableTerrain(true, store->getCell()->getWorldSpace());
             mTerrain->loadCell(store->getCell()->getGridX(), store->getCell()->getGridY());
         }
+
+        if (mSceneOcclusionCallback)
+        {
+            const bool isInterior = !store->getCell()->isExterior() && !store->getCell()->isQuasiExterior();
+            const bool isQuasiExterior = store->getCell()->isQuasiExterior();
+            mSceneOcclusionCallback->setCellType(isInterior, isQuasiExterior);
+        }
     }
     void RenderingManager::removeCell(const MWWorld::CellStore* store)
     {
@@ -704,6 +783,8 @@ namespace MWRender
             updateProjectionMatrix();
         }
         mCamera->update(dt, paused);
+        if (!paused)
+            mEffectManager->updateBrutalPrewarm(mCamera->getPosition(), mCamera->getOrient() * osg::Vec3f(0, 1, 0), mNearClip);
 
         bool isUnderwater = mWater->isUnderwater(mCamera->getPosition());
 
@@ -823,7 +904,8 @@ namespace MWRender
     }
 
     RayResult getIntersectionResult(osgUtil::LineSegmentIntersector* intersector,
-        const osg::ref_ptr<osgUtil::IntersectionVisitor>& visitor, std::span<const MWWorld::Ptr> ignoreList = {})
+        const osg::ref_ptr<osgUtil::IntersectionVisitor>& visitor, std::span<const MWWorld::Ptr> ignoreList = {},
+        bool melee = false)
     {
 //## VR_PATCH BEGIN
 // VR needs the actual node hit, because the 3dgui does not exist as an object in the world.
@@ -870,7 +952,16 @@ namespace MWRender
             }
 
             if (ptrHolder)
+            {
+                int part=-1;
+                if (const auto* npc=dynamic_cast<const NpcAnimation*>(
+                    MWBase::Environment::get().getWorld()->getAnimation(ptrHolder->mPtr)))
+                    part=npc->getPartForNodePath(intersection.nodePath);
+                // Sword parries are not implemented. A carried weapon must not become a flesh hit.
+                if (melee && part==ESM::PRT_Weapon) return;
                 result.mHitObject = ptrHolder->mPtr;
+                result.mHitPart = part;
+            }
 
             unsigned int vertexCounter = 0;
             for (unsigned int i = 0; i < refnumMarkers.size(); ++i)
@@ -905,7 +996,7 @@ namespace MWRender
             }
         };
 
-        if (ignoreList.empty() || intersector->getIntersectionLimit() != osgUtil::LineSegmentIntersector::NO_LIMIT)
+        if ((!melee && ignoreList.empty()) || intersector->getIntersectionLimit() != osgUtil::LineSegmentIntersector::NO_LIMIT)
         {
             test(intersector->getFirstIntersection());
         }
@@ -1011,15 +1102,24 @@ namespace MWRender
     }
 
     RayResult RenderingManager::castRay(const osg::Vec3f& origin, const osg::Vec3f& dest,
-        bool ignorePlayer, bool ignoreActors, uint32_t ignoreMask, std::span<const MWWorld::Ptr> ignoreList)
+        bool ignorePlayer, bool ignoreActors, uint32_t ignoreMask, std::span<const MWWorld::Ptr> ignoreList, bool melee)
     {
         osg::ref_ptr<osgUtil::LineSegmentIntersector> intersector(
             new osgUtil::LineSegmentIntersector(osgUtil::LineSegmentIntersector::MODEL, origin, dest));
-        intersector->setIntersectionLimit(osgUtil::LineSegmentIntersector::LIMIT_NEAREST);
+        intersector->setIntersectionLimit(melee ? osgUtil::LineSegmentIntersector::NO_LIMIT
+            : osgUtil::LineSegmentIntersector::LIMIT_NEAREST);
 
         mRootNode->accept(*getIntersectionVisitor(intersector, ignorePlayer, ignoreActors, ignoreMask, ignoreList));
 
-        return getIntersectionResult(intersector, mIntersectionVisitor, ignoreList);
+        return getIntersectionResult(intersector, mIntersectionVisitor, ignoreList, melee);
+    }
+
+    std::vector<float> RenderingManager::findSegmentCandidates(
+        std::span<const std::pair<osg::Vec3f, osg::Vec3f>> segments, std::span<const unsigned> buckets)
+    {
+        osg::ref_ptr<SwordSegmentIntersector> intersector = new SwordSegmentIntersector(segments, buckets);
+        mRootNode->accept(*getIntersectionVisitor(intersector, true, true, MWRender::Mask_3DGUI));
+        return intersector->ratios();
     }
 
     RayResult RenderingManager::castRay(
@@ -1077,6 +1177,25 @@ namespace MWRender
         bool loop)
     {
         mEffectManager->addEffect(model, texture, worldPosition, scale, isMagicVFX, useAmbientLight, effectId, loop);
+    }
+
+    void RenderingManager::spawnBrutalImpact(std::string_view kind, const osg::Vec3f& position,
+        const osg::Vec3f& direction, float intensity, bool power)
+    {
+        if(kind.starts_with("cut"))mEffectManager->queueCutBlood(kind,position,direction,intensity);
+        else mEffectManager->spawnBrutalImpact(kind, position, direction, intensity, power);
+    }
+
+    bool RenderingManager::spawnBrutalDecapitation(const osg::Vec3f& lowerCenter, const osg::Vec3f& lowerNormal,
+        const osg::Vec3f& upperCenter, const osg::Vec3f& upperNormal, const osg::Vec3f& inheritedVelocity)
+    {
+        return mEffectManager->spawnBrutalDecapitation(lowerCenter, lowerNormal, upperCenter, upperNormal,
+            inheritedVelocity);
+    }
+
+    std::map<std::string, double> RenderingManager::getBrutalImpactStats() const
+    {
+        return mEffectManager->getBrutalImpactStats();
     }
 
     void RenderingManager::removeEffect(std::string_view effectId)
@@ -1156,6 +1275,10 @@ namespace MWRender
         }
 //## VR_PATCH END
 
+        if (mSwordClinchPoseCallback)
+            mSceneRoot->removeUpdateCallback(mSwordClinchPoseCallback);
+        mSwordClinchPoseCallback = new SwordClinchPoseCallback(mPlayerAnimation.get());
+        mSceneRoot->addUpdateCallback(mSwordClinchPoseCallback);
         mCamera->setAnimation(mPlayerAnimation.get());
         mCamera->attachTo(player);
     }
@@ -1377,7 +1500,17 @@ namespace MWRender
 
         for (Settings::CategorySettingVector::const_iterator it = changed.begin(); it != changed.end(); ++it)
         {
-            if (it->first == "Camera" && it->second == "field of view")
+            if (it->first == "Game"
+                && (it->second == "curvy body meshes" || it->second == "curvy naked body"))
+            {
+                if (MWMechanics::getPlayer().isInCell())
+                    rebuildPtr(MWMechanics::getPlayer());
+            }
+            else if (it->first == "Game" && it->second == "actor animation lod distance")
+            {
+                SceneUtil::Skeleton::setUpdateLodDistance(Settings::game().mActorAnimationLodDistance);
+            }
+            else if (it->first == "Camera" && it->second == "field of view")
             {
                 mFieldOfView = Settings::camera().mFieldOfView;
                 updateProjection = true;
@@ -1456,6 +1589,37 @@ namespace MWRender
                     if (auto* hud = MWBase::Environment::get().getWindowManager()->getPostProcessorHud())
                         hud->setVisible(false);
                 }
+            }
+            else if (it->first == "Shadows")
+            {
+                mViewer->stopThreading();
+
+                mShadowManager->setupShadowSettings(
+                    Settings::shadows(), mResourceSystem->getSceneManager()->getShaderManager());
+
+                // Recompute casting masks from current settings
+                int shadowCastingTraversalMask = Mask_Scene;
+                if (Settings::shadows().mActorShadows)
+                    shadowCastingTraversalMask |= Mask_Actor;
+                if (Settings::shadows().mPlayerShadows)
+                    shadowCastingTraversalMask |= Mask_Player;
+
+                int indoorShadowCastingTraversalMask = shadowCastingTraversalMask;
+                if (Settings::shadows().mObjectShadows)
+                    shadowCastingTraversalMask |= (Mask_Object | Mask_Static);
+                if (Settings::shadows().mTerrainShadows)
+                    shadowCastingTraversalMask |= Mask_Terrain;
+
+                mShadowManager->updateCastingMasks(shadowCastingTraversalMask, indoorShadowCastingTraversalMask);
+
+                // Update global shader defines (soft shadows, resolution, cascade count)
+                auto defines = mResourceSystem->getSceneManager()->getShaderManager().getGlobalDefines();
+                auto shadowDefines = mShadowManager->getShadowDefines(Settings::shadows());
+                for (const auto& [name, value] : shadowDefines)
+                    defines[name] = value;
+                mResourceSystem->getSceneManager()->getShaderManager().setGlobalDefines(defines);
+
+                mViewer->startThreading();
             }
 //## VR_PATCH BEGIN
             else if (it->first == "VR")
@@ -1703,4 +1867,26 @@ namespace MWRender
     {
         mNavMesh->setMode(value);
     }
+
+    void RenderingManager::setOcclusionCachePath(const std::string& path)
+    {
+        if (!mOcclusionCuller)
+            return;
+        mOcclusionStorage = std::make_unique<OcclusionStorage>(path);
+        const float occluderMinRadius = Settings::camera().mOcclusionOccluderMinRadius;
+        const float occluderMaxRadius = Settings::camera().mOcclusionOccluderMaxRadius;
+        const float occluderShrinkFactor = Settings::camera().mOcclusionOccluderShrinkFactor;
+        const int occluderMeshRes = Settings::camera().mOcclusionOccluderMeshResolution;
+        const int occluderMaxMeshRes = Settings::camera().mOcclusionOccluderMaxMeshResolution;
+        const float occluderInsideThreshold = Settings::camera().mOcclusionOccluderInsideThreshold;
+        const float occluderMaxDistance = Settings::camera().mOcclusionOccluderMaxDistance;
+        const bool enableStatics = Settings::camera().mOcclusionCullingStatics;
+        const unsigned int maxTriangles = static_cast<unsigned int>(Settings::camera().mOcclusionMaxTriangles);
+        mObjects->setOcclusionCuller(mOcclusionCuller, occluderMinRadius, occluderMaxRadius, occluderShrinkFactor,
+            occluderMeshRes, occluderMaxMeshRes, occluderInsideThreshold, occluderMaxDistance, enableStatics,
+            maxTriangles, mOcclusionStorage.get());
+        if (mSceneOcclusionCallback)
+            mSceneOcclusionCallback->setStorage(mOcclusionStorage.get());
+    }
+
 }

@@ -1,3 +1,4 @@
+#include "windowcoordinates.hpp"
 #include "sdlinputwrapper.hpp"
 //## VR_PATCH BEGIN
 #include "sdlgraphicswindow.hpp"
@@ -50,8 +51,11 @@ namespace SDLUtil
         SDL_GetWindowSize(mSDLWindow, &w, &h);
         int dw, dh;
         SDL_GL_GetDrawableSize(mSDLWindow, &dw, &dh);
-        mScaleX = static_cast<Uint16>(dw / w);
-        mScaleY = static_cast<Uint16>(dh / h);
+        const float scaleX = drawableScale(w, dw), scaleY = drawableScale(h, dh);
+        if (scaleX != mScaleX || scaleY != mScaleY)
+            mRelativeRemainderX = mRelativeRemainderY = 0.f;
+        mScaleX = scaleX;
+        mScaleY = scaleY;
     }
 
     void InputWrapper::capture(bool windowEventsOnly)
@@ -114,11 +118,24 @@ namespace SDLUtil
                     mSensorListener->sensorUpdated(evt.sensor);
                     break;
                 case SDL_MOUSEBUTTONDOWN:
-                    mMouseListener->mousePressed(evt.button, evt.button.button);
-                    break;
                 case SDL_MOUSEBUTTONUP:
-                    mMouseListener->mouseReleased(evt.button, evt.button.button);
+                {
+                    // A click can be the first event after resize/scale changes. Use
+                    // this event's logical position, not the previous GUI cursor cache.
+                    mMouseX = evt.button.x;
+                    mMouseY = evt.button.y;
+                    MouseMotionEvent motion{};
+                    motion.type = SDL_MOUSEMOTION;
+                    motion.x = static_cast<Sint32>(std::lround(mMouseX * mScaleX));
+                    motion.y = static_cast<Sint32>(std::lround(mMouseY * mScaleY));
+                    motion.z = mMouseZ;
+                    mMouseListener->mouseMoved(motion);
+                    if (evt.type == SDL_MOUSEBUTTONDOWN)
+                        mMouseListener->mousePressed(evt.button, evt.button.button);
+                    else
+                        mMouseListener->mouseReleased(evt.button, evt.button.button);
                     break;
+                }
                 case SDL_KEYDOWN:
                     mKeyboardListener->keyPressed(evt.key);
 
@@ -148,12 +165,22 @@ namespace SDLUtil
                     break;
                 case SDL_KEYMAPCHANGED:
                     break;
-                case SDL_JOYHATMOTION: // As we manage everything with GameController, don't even bother with these.
+                case SDL_JOYHATMOTION: // Sticks/hats are handled via the GameController mapping.
                 case SDL_JOYAXISMOTION:
-                case SDL_JOYBUTTONDOWN:
-                case SDL_JOYBUTTONUP:
                 case SDL_JOYDEVICEADDED:
                 case SDL_JOYDEVICEREMOVED:
+                    break;
+                // Raw joystick buttons still come through even for a device opened as a game
+                // controller. We forward them so extra buttons beyond the standard controller
+                // layout (e.g. an MMO gamepad's extra keys) can be recognized; the controller
+                // manager de-duplicates the ones already mapped to standard buttons.
+                case SDL_JOYBUTTONDOWN:
+                    if (mConListener)
+                        mConListener->joyButtonPressed(evt.jbutton.which, evt.jbutton);
+                    break;
+                case SDL_JOYBUTTONUP:
+                    if (mConListener)
+                        mConListener->joyButtonReleased(evt.jbutton.which, evt.jbutton);
                     break;
                 case SDL_CONTROLLERDEVICEADDED:
                     if (mConListener)
@@ -291,11 +318,18 @@ namespace SDLUtil
                 // This should also fire SIZE_CHANGED, so no need to handle
                 break;
 
+#if SDL_VERSION_ATLEAST(2, 0, 18)
+            case SDL_WINDOWEVENT_DISPLAY_CHANGED:
+                _setWindowScale();
+                break;
+#endif
             case SDL_WINDOWEVENT_FOCUS_GAINED:
+                mRelativeRemainderX = mRelativeRemainderY = 0.f;
                 mWindowHasFocus = true;
                 updateMouseSettings();
                 break;
             case SDL_WINDOWEVENT_FOCUS_LOST:
+                mRelativeRemainderX = mRelativeRemainderY = 0.f;
                 mWindowHasFocus = false;
                 updateMouseSettings();
                 break;
@@ -333,6 +367,11 @@ namespace SDLUtil
         mWarpY = static_cast<Uint16>(y);
     }
 
+    void InputWrapper::warpMouseInDrawable(int x, int y)
+    {
+        warpMouse(static_cast<int>(std::lround(x / mScaleX)), static_cast<int>(std::lround(y / mScaleY)));
+    }
+
     /// \brief Locks the pointer to the window
     void InputWrapper::setGrabPointer(bool grab)
     {
@@ -366,6 +405,7 @@ namespace SDLUtil
             return;
 
         mMouseRelative = relative;
+        mRelativeRemainderX = mRelativeRemainderY = 0.f;
 
         mWrapPointer = false;
 
@@ -427,22 +467,29 @@ namespace SDLUtil
     MouseMotionEvent InputWrapper::_packageMouseMotion(const SDL_Event& evt)
     {
         MouseMotionEvent packEvt = {};
-        packEvt.x = mMouseX * mScaleX;
-        packEvt.y = mMouseY * mScaleY;
+        packEvt.x = static_cast<Sint32>(std::lround(mMouseX * mScaleX));
+        packEvt.y = static_cast<Sint32>(std::lround(mMouseY * mScaleY));
         packEvt.z = mMouseZ;
 
         if (evt.type == SDL_MOUSEMOTION)
         {
-            packEvt.x = mMouseX = evt.motion.x * mScaleX;
-            packEvt.y = mMouseY = evt.motion.y * mScaleY;
-            packEvt.xrel = evt.motion.xrel * mScaleX;
-            packEvt.yrel = evt.motion.yrel * mScaleY;
+            mMouseX = evt.motion.x; // Store logical coordinates; wheel events scale them once.
+            packEvt.x = static_cast<Sint32>(std::lround(mMouseX * mScaleX));
+            mMouseY = evt.motion.y;
+            packEvt.y = static_cast<Sint32>(std::lround(mMouseY * mScaleY));
+            const float relativeX = evt.motion.xrel * mScaleX + mRelativeRemainderX;
+            const float relativeY = evt.motion.yrel * mScaleY + mRelativeRemainderY;
+            packEvt.xrel = static_cast<Sint32>(std::lround(relativeX));
+            packEvt.yrel = static_cast<Sint32>(std::lround(relativeY));
+            mRelativeRemainderX = relativeX - packEvt.xrel;
+            mRelativeRemainderY = relativeY - packEvt.yrel;
             packEvt.type = SDL_MOUSEMOTION;
             if (mFirstMouseMove)
             {
                 // first event should be treated as non-relative, since there's no point of reference
                 // SDL then (incorrectly) uses (0,0) as point of reference, on Linux at least...
                 packEvt.xrel = packEvt.yrel = 0;
+                mRelativeRemainderX = mRelativeRemainderY = 0.f;
                 mFirstMouseMove = false;
             }
         }

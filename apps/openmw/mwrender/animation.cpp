@@ -1,10 +1,17 @@
 #include "animation.hpp"
 
+#include <cctype>
+
 #include <algorithm>
+#include <cctype>
 #include <iomanip>
 #include <limits>
+#include <utility>
+#include <set>
+#include <array>
 
 #include <osg/BlendFunc>
+#include <osg/FrontFace>
 #include <osg/LightModel>
 #include <osg/Material>
 #include <osg/MatrixTransform>
@@ -27,6 +34,7 @@
 #include <components/esm3/loadmgef.hpp>
 #include <components/esm3/loadnpc.hpp>
 #include <components/esm3/loadrace.hpp>
+#include <components/esm3/releasedequipmentstate.hpp>
 #include <components/esm4/loadligh.hpp>
 
 #include <components/misc/constants.hpp>
@@ -41,13 +49,16 @@
 #include <components/sceneutil/lightcommon.hpp>
 #include <components/sceneutil/lightmanager.hpp>
 #include <components/sceneutil/lightutil.hpp>
+#include <components/sceneutil/morphgeometry.hpp>
 #include <components/sceneutil/positionattitudetransform.hpp>
+#include <components/sceneutil/riggeometry.hpp>
 #include <components/sceneutil/skeleton.hpp>
 #include <components/sceneutil/statesetupdater.hpp>
 #include <components/sceneutil/util.hpp>
 #include <components/sceneutil/visitor.hpp>
 
 #include <components/settings/values.hpp>
+#include <components/misc/jigglepolicy.hpp>
 
 #include "../mwbase/environment.hpp"
 #include "../mwbase/luamanager.hpp"
@@ -55,13 +66,21 @@
 #include "../mwworld/cellstore.hpp"
 #include "../mwworld/class.hpp"
 #include "../mwworld/containerstore.hpp"
+#include "../mwworld/datetimemanager.hpp"
 #include "../mwworld/esmstore.hpp"
 
 #include "../mwmechanics/character.hpp" // FIXME: for MWMechanics::Priority
+#include "../mwmechanics/creaturestats.hpp"
 #include "../mwmechanics/weapontype.hpp"
 
 #include "actorutil.hpp"
+#include "jigglebonecontroller.hpp"
+#include "verletclothcontroller.hpp"
+
+#include <map>
 #include "rotatecontroller.hpp"
+#include "releasedequipment.hpp"
+#include "releasedequipmentcompat.hpp"
 #include "util.hpp"
 #include "vismask.hpp"
 
@@ -72,6 +91,701 @@
 
 namespace
 {
+    std::string normalizedKey(std::string key)
+    {
+        std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) {
+            if (c == '-' || c == ' ' || c == '.')
+                return static_cast<char>('_');
+            return static_cast<char>(std::tolower(c));
+        });
+        return key;
+    }
+
+    bool parseBool(std::string value, bool& out)
+    {
+        value = normalizedKey(std::move(value));
+        if (value == "1" || value == "true" || value == "yes" || value == "on")
+        {
+            out = true;
+            return true;
+        }
+        if (value == "0" || value == "false" || value == "no" || value == "off")
+        {
+            out = false;
+            return true;
+        }
+        return false;
+    }
+
+    bool parseVerletInt(const std::string& value, int& out)
+    {
+        try
+        {
+            std::size_t consumed = 0;
+            out = std::stoi(value, &consumed);
+            return consumed != 0;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    bool hasSecondaryMotionController(osg::Node* node)
+    {
+        if (!node)
+            return false;
+
+        osg::Callback* cb = node->getUpdateCallback();
+        while (cb)
+        {
+            if (dynamic_cast<MWRender::VerletClothController*>(cb)
+                || dynamic_cast<MWRender::JiggleBoneController*>(cb))
+                return true;
+            cb = cb->getNestedCallback();
+        }
+        return false;
+    }
+
+    /// Only the first root of a chain group carries the VerletClothController, which drives every chain hanging
+    /// from the same parent bone. A later scan must not give the other roots of that group a second controller, so
+    /// look for a sibling's controller that already drives this root. This is checked live instead of marking the
+    /// bones: when the controller's root is removed (its item unequipped), the group's remaining chains are free
+    /// to be attached again.
+    bool simulatedByGroupController(const osg::Node* root)
+    {
+        for (unsigned int p = 0; p < root->getNumParents(); ++p)
+        {
+            const osg::Group* parent = root->getParent(p);
+            for (unsigned int c = 0; c < parent->getNumChildren(); ++c)
+            {
+                for (const osg::Callback* cb = parent->getChild(c)->getUpdateCallback(); cb;
+                     cb = cb->getNestedCallback())
+                    if (const auto* verlet = dynamic_cast<const MWRender::VerletClothController*>(cb))
+                        if (verlet->controls(root))
+                            return true;
+            }
+        }
+        return false;
+    }
+
+    /// A chain root is marked with OPENMW_VERLET_CLOTH (or verlet_cloth=true) and verlet_count=N; the
+    /// optional verlet_pin_count=M holds the first M particles at their animated position (default 3).
+    struct VerletRootInfo
+    {
+        bool mEnabled = false;
+        int mCount = 0;
+        int mPin = 3;
+    };
+
+    VerletRootInfo verletRootInfo(const osg::Node& node)
+    {
+        VerletRootInfo info;
+        bool b = false;
+        if (node.getUserValue("verlet_cloth", b) || node.getUserValue("verlet_active", b))
+            info.mEnabled = b;
+        int value = 0;
+        if (node.getUserValue("verlet_count", value))
+            info.mCount = value;
+        if (node.getUserValue("verlet_pin_count", value))
+            info.mPin = std::max(1, value);
+
+        for (const std::string& description : node.getDescriptions())
+        {
+            if (normalizedKey(description).find("openmw_verlet_cloth") != std::string::npos)
+                info.mEnabled = true;
+            std::size_t start = 0;
+            while (start < description.size())
+            {
+                const std::size_t end = description.find_first_of(";\n,", start);
+                const std::string token
+                    = description.substr(start, end == std::string::npos ? std::string::npos : end - start);
+                const std::size_t sep = token.find_first_of("=:");
+                if (sep != std::string::npos)
+                {
+                    const std::string key = normalizedKey(token.substr(0, sep));
+                    int number = 0;
+                    if (key == "verlet_count" && parseVerletInt(token.substr(sep + 1), number))
+                        info.mCount = number;
+                    else if (key == "verlet_pin_count" && parseVerletInt(token.substr(sep + 1), number))
+                        info.mPin = std::max(1, number);
+                    else if ((key == "verlet_cloth" || key == "verlet_active") && parseBool(token.substr(sep + 1), b))
+                        info.mEnabled = b;
+                }
+                if (end == std::string::npos)
+                    break;
+                start = end + 1;
+            }
+        }
+        return info;
+    }
+
+    std::vector<std::string> numberedVerletChainNames(const std::string& rootName, int count)
+    {
+        std::vector<std::string> names;
+        if (count <= 0)
+            return names;
+
+        std::size_t digitStart = rootName.size();
+        while (digitStart > 0 && std::isdigit(static_cast<unsigned char>(rootName[digitStart - 1])))
+            --digitStart;
+
+        if (digitStart == rootName.size())
+        {
+            names.push_back(rootName);
+            return names;
+        }
+
+        const std::string prefix = rootName.substr(0, digitStart);
+        const std::string digits = rootName.substr(digitStart);
+        const int width = static_cast<int>(digits.size());
+
+        int startNumber = 0;
+        try
+        {
+            startNumber = std::stoi(digits);
+        }
+        catch (...)
+        {
+            names.push_back(rootName);
+            return names;
+        }
+
+        names.reserve(static_cast<std::size_t>(count));
+        for (int offset = 0; offset < count; ++offset)
+        {
+            std::string number = std::to_string(startNumber + offset);
+            if (static_cast<int>(number.size()) < width)
+                number.insert(number.begin(), static_cast<std::size_t>(width - number.size()), '0');
+            names.push_back(prefix + number);
+        }
+        return names;
+    }
+
+    struct DaggerItemCommand
+    {
+        float mTime;
+        bool mReverse;
+        bool mFast;
+        bool mReset = false;
+    };
+
+    // Dark Messiah animates each dagger as a separate entity. Its item clock
+    // survives arm clip changes, and a repeated request usually keeps the
+    // unfinished item sequence. Store that state on the mount, not on a clip.
+    class DaggerItemState : public osg::Object
+    {
+    public:
+        DaggerItemState() { setName("BrutalDaggerItemClock"); }
+        DaggerItemState(const DaggerItemState& other, const osg::CopyOp& copy)
+            : osg::Object(other, copy)
+        {
+        }
+        META_Object(MWRender, DaggerItemState)
+
+        bool mInitialized = false;
+        bool mReverse = false;
+        bool mFast = false;
+        float mElapsed = 1000.f;
+        std::shared_ptr<float> mArmTime;
+        std::weak_ptr<float> mPendingArmTime;
+        float mPendingPhaseStart = 0.f;
+        float mClockAtHandoff = 0.f;
+        float mLastArmTime = 0.f;
+        float mPhaseStart = 0.f;
+        float mLoopStart = 0.f;
+        float mLoopStop = 0.f;
+        std::vector<DaggerItemCommand> mCommands;
+        unsigned int mLastFrame = ~0u;
+    };
+
+    class DaggerSampleTime : public SceneUtil::ControllerSource
+    {
+    public:
+        float mTime = 0.f;
+        float getValue(osg::NodeVisitor*) override { return mTime; }
+    };
+
+    class DaggerItemController
+        : public SceneUtil::NodeCallback<DaggerItemController, NifOsg::MatrixTransform*>
+    {
+        struct Primitive
+        {
+            float mStart = -1.f;
+            float mStop = -1.f;
+        };
+        osg::ref_ptr<SceneUtil::KeyframeController> mTrack;
+        osg::ref_ptr<SceneUtil::KeyframeController> mProbe;
+        osg::ref_ptr<NifOsg::MatrixTransform> mArmFrame;
+        std::shared_ptr<DaggerSampleTime> mProbeTime = std::make_shared<DaggerSampleTime>();
+        osg::ref_ptr<DaggerItemState> mState;
+        std::shared_ptr<float> mArmTime;
+        std::array<Primitive, 4> mPrimitives;
+        std::vector<DaggerItemCommand> mCommands;
+        float mStart;
+        float mEntry;
+        float mStop;
+        float mLoopStart;
+        float mLoopStop;
+        bool mRight;
+        float mAdvancedThisFrame = 0.f;
+        float mRangeScale = 1.f;
+        float mOldClockAtHandoff = 0.f;
+
+        static std::size_t primitiveIndex(bool reverse, bool fast)
+        {
+            return static_cast<std::size_t>(reverse) + 2 * static_cast<std::size_t>(fast);
+        }
+
+        void advance(float duration)
+        {
+            const float elapsed = std::max(0.f, duration) * mRangeScale;
+            mAdvancedThisFrame += elapsed;
+            mState->mElapsed = std::min(1000.f, mState->mElapsed + elapsed);
+        }
+
+        void range(float begin, float end, bool includeBegin, const std::vector<DaggerItemCommand>& commands)
+        {
+            float cursor = begin;
+            for (const DaggerItemCommand& command : commands)
+            {
+                if (command.mTime < begin || (!includeBegin && command.mTime == begin)
+                    || command.mTime > end)
+                    continue;
+                advance(command.mTime - cursor);
+                cursor = command.mTime;
+                if (command.mReset)
+                {
+                    mState->mReverse = mRight;
+                    mState->mFast = false;
+                    mState->mElapsed = 1000.f;
+                    continue;
+                }
+                // Preserve the visible item pose/clock for a repeated grip.
+                // The source server sometimes changes the right sequence ID
+                // for this request, but actual reference renders do not rewind
+                // the blade through the opposite grip. Replaying its raw first
+                // pose here would create an extra 180-degree spin.
+                if (mState->mReverse == command.mReverse)
+                    continue;
+                mState->mReverse = command.mReverse;
+                mState->mFast = command.mFast;
+                mState->mElapsed = 0.f;
+            }
+            advance(end - cursor);
+        }
+
+        void timedRange(float begin, float end, bool includeBegin, float budget,
+            const std::vector<DaggerItemCommand>& commands)
+        {
+            const float span = std::max(0.f, end - begin);
+            mRangeScale = span > 0.f ? budget / span : 0.f;
+            range(begin, end, includeBegin, commands);
+            mRangeScale = 1.f;
+            if (span == 0.f)
+                advance(budget);
+        }
+
+    public:
+        DaggerItemController(SceneUtil::KeyframeController* track, DaggerItemState* state,
+            std::shared_ptr<float> armTime, const SceneUtil::TextKeyMap& keys, std::string_view group,
+            float start, float entry, float stop, float loopStart, float loopStop, bool right,
+            NifOsg::MatrixTransform* armFrame)
+            : mTrack(track)
+            , mArmFrame(armFrame)
+            , mState(state)
+            , mArmTime(std::move(armTime))
+            , mStart(start)
+            , mEntry(std::min(entry, *mArmTime))
+            , mStop(stop)
+            , mLoopStart(std::clamp(loopStart, start, stop))
+            , mLoopStop(std::clamp(loopStop, start, stop))
+            , mRight(right)
+        {
+            if (mState->mArmTime != mArmTime || mState->mPhaseStart != mStart)
+            {
+                // Capture before a background idle can keep advancing after
+                // losing the arms. Rebuilding other controllers before UPDATE
+                // must preserve this first handoff snapshot.
+                if (mState->mPendingArmTime.lock() != mArmTime || mState->mPendingPhaseStart != mStart)
+                {
+                    mState->mPendingArmTime = mArmTime;
+                    mState->mPendingPhaseStart = mStart;
+                    mState->mClockAtHandoff = mState->mArmTime ? *mState->mArmTime : mState->mLastArmTime;
+                }
+                mOldClockAtHandoff = mState->mClockAtHandoff;
+            }
+            const std::string prefix = std::string(group) + ": dagger ";
+            const std::string animationPrefix = std::string(group) + ": ";
+            const std::string side = right ? "right " : "left ";
+            std::optional<float> authoredLoopStart;
+            std::optional<float> authoredLoopStop;
+            for (const auto& [time, key] : keys)
+            {
+                // AnimState learns generic loop keys only as playback reaches
+                // them. This independent controller is constructed earlier and
+                // must already know the authored bounds: a guard-idle wrap must
+                // not scan forward through the later guard-out item commands.
+                if (time >= start && time <= stop)
+                {
+                    if (key == animationPrefix + "loop start")
+                        authoredLoopStart = time;
+                    else if (key == animationPrefix + "loop stop")
+                        authoredLoopStop = time;
+                }
+                if (time >= start && time <= stop && key == prefix + "item " + side + "reset")
+                    mCommands.push_back({ time, right, false, true });
+                for (bool reverse : { false, true })
+                {
+                    const std::string direction = reverse ? "reverse " : "forward ";
+                    for (bool fast : { false, true })
+                    {
+                        const std::string suffix = side + direction + (fast ? "fast" : "slow");
+                        Primitive& primitive = mPrimitives[primitiveIndex(reverse, fast)];
+                        if (key == prefix + "primitive " + suffix + " start")
+                            primitive.mStart = time;
+                        else if (key == prefix + "primitive " + suffix + " stop")
+                            primitive.mStop = time;
+                        if (time >= start && time <= stop && key == prefix + "item " + suffix)
+                            mCommands.push_back({ time, reverse, fast, false });
+                        if (time >= start && time <= stop && key == prefix + "item " + suffix + " keep direction")
+                            mCommands.push_back({ time, reverse, fast, false });
+                    }
+                    if (time >= start && time <= stop && key == prefix + "item " + side + direction + "default")
+                        mCommands.push_back({ time, reverse, false, false });
+                }
+            }
+            if (authoredLoopStart && authoredLoopStop && *authoredLoopStop > *authoredLoopStart)
+            {
+                mLoopStart = *authoredLoopStart;
+                mLoopStop = *authoredLoopStop;
+            }
+            mProbe = dynamic_cast<SceneUtil::KeyframeController*>(track->clone(osg::CopyOp::SHALLOW_COPY));
+            mProbe->setSource(mProbeTime);
+            mProbe->setFunction(nullptr);
+        }
+
+        bool valid() const
+        {
+            return std::all_of(mPrimitives.begin(), mPrimitives.end(), [](const Primitive& primitive) {
+                return primitive.mStart >= 0.f && primitive.mStop > primitive.mStart;
+            });
+        }
+
+        void operator()(NifOsg::MatrixTransform* node, osg::NodeVisitor* visitor)
+        {
+            const float now = std::clamp(*mArmTime, mStart, mStop);
+            const bool samePhase = mState->mArmTime == mArmTime && mState->mPhaseStart == mStart;
+            const unsigned int frame = visitor->getFrameStamp()->getFrameNumber();
+            if (mState->mLastFrame != frame || !samePhase)
+            {
+                mAdvancedThisFrame = 0.f;
+                const auto& environment = MWBase::Environment::get();
+                const float simulationStep = environment.getWorld()->getTimeManager()->isPaused()
+                    ? 0.f : environment.getFrameDuration();
+                if (!mState->mInitialized)
+                {
+                    mState->mInitialized = true;
+                    mState->mReverse = mRight;
+                }
+                if (!samePhase)
+                {
+                    // Old and new arm states can both advance in this frame,
+                    // but the independent item has one simulation-time budget.
+                    // Only old commands reached before handoff remain active.
+                    if (mState->mArmTime)
+                    {
+                        const float previous = mOldClockAtHandoff;
+                        if (previous >= mState->mLastArmTime)
+                            timedRange(mState->mLastArmTime, previous, false,
+                                std::min(simulationStep, previous - mState->mLastArmTime), mState->mCommands);
+                        else if (mState->mLoopStop > mState->mLoopStart)
+                        {
+                            const float first = mState->mLoopStop - mState->mLastArmTime;
+                            const float second = previous - mState->mLoopStart;
+                            const float span = first + second;
+                            const float budget = std::min(simulationStep, span);
+                            const float firstBudget = span > 0.f ? budget * (first / span) : 0.f;
+                            timedRange(mState->mLastArmTime, mState->mLoopStop, false, firstBudget, mState->mCommands);
+                            timedRange(mState->mLoopStart, previous, true, budget - firstBudget, mState->mCommands);
+                        }
+                    }
+                    // A charged hold may begin at the last windup pose. Its
+                    // preceding .5 seconds were never played by this state.
+                    timedRange(mEntry, now, true,
+                        std::min(std::max(0.f, simulationStep - mAdvancedThisFrame), std::max(0.f, now - mEntry)),
+                        mCommands);
+                }
+                else if (now >= mState->mLastArmTime)
+                    timedRange(mState->mLastArmTime, now, false, simulationStep, mCommands);
+                else if (mLoopStop > mLoopStart)
+                {
+                    const float first = mLoopStop - mState->mLastArmTime;
+                    const float span = first + now - mLoopStart;
+                    const float firstBudget = span > 0.f ? simulationStep * (first / span) : 0.f;
+                    timedRange(mState->mLastArmTime, mLoopStop, false, firstBudget, mCommands);
+                    timedRange(mLoopStart, now, true, simulationStep - firstBudget, mCommands);
+                }
+                // A frozen held arm pose still leaves the separate item
+                // entity running. Add only time not consumed by an arm range;
+                // paused rendering and a second traversal add no extra tick.
+                advance(simulationStep - mAdvancedThisFrame);
+                mState->mArmTime = mArmTime;
+                mState->mLastArmTime = now;
+                mState->mPhaseStart = mStart;
+                mState->mLoopStart = mLoopStart;
+                mState->mLoopStop = mLoopStop;
+                mState->mCommands = mCommands;
+                mState->mLastFrame = frame;
+                mState->mPendingArmTime.reset();
+            }
+            auto transform = mTrack->getCurrentTransformation(visitor);
+            const Primitive& primitive = mPrimitives[primitiveIndex(mState->mReverse, mState->mFast)];
+            mProbeTime->mTime = std::min(primitive.mStart + mState->mElapsed, primitive.mStop);
+            const auto item = mProbe->getCurrentTransformation(visitor);
+            if (mArmFrame && item.mRotation)
+            {
+                // This inert sibling is keyed and blended with the anatomical
+                // hand. It is updated first and acts as the item's virtual
+                // parent; its frame never passes through the item flip clock.
+                osg::Matrix local = osg::Matrix::rotate(*item.mRotation);
+                if (item.mTranslation)
+                    local.setTrans(*item.mTranslation);
+                local *= mArmFrame->getMatrix();
+                node->setRotation(local.getRotate());
+                node->setTranslation(local.getTrans());
+            }
+            else
+            {
+                if (item.mRotation)
+                    node->setRotation(*item.mRotation);
+                if (item.mTranslation)
+                    node->setTranslation(*item.mTranslation);
+                else if (transform.mTranslation)
+                    node->setTranslation(*transform.mTranslation);
+            }
+            if (transform.mScale)
+                node->setScale(*transform.mScale);
+            traverse(node, visitor);
+        }
+    };
+
+    bool isSlideArmBlendState(bool player, std::size_t boneGroup, std::string_view group, bool slideAttack)
+    {
+        return player && (boneGroup == MWRender::BoneGroup_LeftArm || boneGroup == MWRender::BoneGroup_RightArm)
+            && (group == "brutal_slide" || (group == "weapononehand" && slideAttack));
+    }
+
+    osg::ref_ptr<const SceneUtil::AnimBlendRules> slideArmBlendRules(
+        std::string_view group, std::string_view startKey)
+    {
+        // Windup/release/follow disable and replay the same weapon group. The
+        // intervening reset can briefly select slide without rendering it; do
+        // not turn that bookkeeping transition into another strike-time blend.
+        if (group == "weapononehand" && startKey != "slash start")
+            return nullptr;
+        static const osg::ref_ptr<const SceneUtil::AnimBlendRules> rules = new SceneUtil::AnimBlendRules(
+            std::vector<SceneUtil::AnimBlendRules::BlendRule>{
+                { "brutal_slide", "*", "weapononehand", "slash *", .08f, "sineOut" },
+                { "weapononehand", "*", "brutal_slide", "*", .08f, "sineOut" },
+            });
+        return rules;
+    }
+
+    // The dagger and staff contests enter with the Source sequence fade (.2 s, linear): their guard
+    // and contest poses are much further apart than the sword's, and a shorter ease shows as a jump.
+    osg::ref_ptr<const SceneUtil::AnimBlendRules> familyClinchArmBlendRules()
+    {
+        static const osg::ref_ptr<const SceneUtil::AnimBlendRules> rules = new SceneUtil::AnimBlendRules(
+            std::vector<SceneUtil::AnimBlendRules::BlendRule>{
+                { "*", "*", "brutal_clinch*", "*", .2f, "linear" },
+                { "brutal_clinch*", "*", "*", "*", .2f, "linear" },
+            });
+        return rules;
+    }
+
+    osg::ref_ptr<const SceneUtil::AnimBlendRules> clinchArmBlendRules()
+    {
+        // Only the paired sword action opts the private first-person arms into
+        // interpolation. Camera/root and the normal weapon timings stay authored.
+        static const osg::ref_ptr<const SceneUtil::AnimBlendRules> rules = new SceneUtil::AnimBlendRules(
+            std::vector<SceneUtil::AnimBlendRules::BlendRule>{
+                { "*", "*", "brutal_clinch*", "*", .12f, "sineOut" },
+                { "brutal_clinch*", "*", "*", "*", .12f, "sineOut" },
+            });
+        return rules;
+    }
+
+    struct ReleasedSource
+    {
+        osg::ref_ptr<osg::Geometry> geometry;
+        osg::NodePath path;
+        uint32_t ordinal = 0;
+        uint32_t recordIndex = std::numeric_limits<uint32_t>::max();
+        bool plain = false;
+    };
+
+    class ReleasedSourcesVisitor final : public osg::NodeVisitor
+    {
+    public:
+        std::vector<ReleasedSource> sources;
+        std::map<std::string, uint32_t> ordinals;
+
+        ReleasedSourcesVisitor() : osg::NodeVisitor(TRAVERSE_ALL_CHILDREN)
+        { setNodeMaskOverride(~0u); }
+
+        void apply(osg::Drawable& drawable) override
+        {
+            osg::ref_ptr<osg::Geometry> source;
+            if (auto* rig = dynamic_cast<SceneUtil::RigGeometry*>(&drawable))
+                source = rig->getSourceGeometry();
+            else if (auto* morph = dynamic_cast<SceneUtil::MorphGeometry*>(&drawable))
+                source = morph->getSourceGeometry();
+            else
+                source = drawable.asGeometry();
+            if (!source)
+                return;
+            ReleasedSource entry;
+            entry.plain = dynamic_cast<SceneUtil::RigGeometry*>(&drawable) == nullptr
+                && dynamic_cast<SceneUtil::MorphGeometry*>(&drawable) == nullptr;
+            entry.geometry = source;
+            entry.path = getNodePath();
+            entry.ordinal = ordinals[source->getName()]++;
+            for (auto it = entry.path.rbegin(); it != entry.path.rend(); ++it)
+                if ((*it)->getUserValue("recordIndex", entry.recordIndex))
+                    break;
+            sources.push_back(std::move(entry));
+        }
+    };
+
+    osg::ref_ptr<osg::Group> restoreReleasedEquipment(
+        osg::Node& sourceRoot, const ESM::ReleasedEquipmentState& saved)
+    {
+        if (!saved.valid())
+            throw std::runtime_error("Invalid released equipment render snapshot");
+        ReleasedSourcesVisitor visitor;
+        sourceRoot.accept(visitor);
+        osg::ref_ptr<osg::Group> result = new osg::Group;
+        result->setName("Released equipment");
+        std::set<const ReleasedSource*> used;
+        std::size_t compatibilityBudget = ESM::ReleasedEquipmentState::MaxVertices;
+        for (const auto& drawable : saved.mDrawables)
+        {
+            const ReleasedSource* found = nullptr;
+            bool nativeStaticArrays = false;
+            for (const auto& entry : visitor.sources)
+            {
+                if (entry.geometry->getName() != drawable.mSourceName
+                    || !entry.geometry->getVertexArray()
+                    || entry.geometry->getVertexArray()->getNumElements() != drawable.mSourceVertexCount
+                    || MWRender::releasedEquipmentTopologyHash(*entry.geometry) != drawable.mSourceTopologyHash)
+                    continue;
+                const bool hasRecord = drawable.mSourceRecordIndex != std::numeric_limits<uint32_t>::max();
+                if ((hasRecord && entry.recordIndex != drawable.mSourceRecordIndex)
+                    || (!hasRecord && entry.ordinal != drawable.mSourceOrdinal))
+                    continue;
+                if (found)
+                    throw std::runtime_error("Ambiguous released equipment source geometry");
+                found = &entry;
+            }
+            if (!found)
+            {
+                for (const auto& entry : visitor.sources)
+                {
+                    if (!entry.plain || used.contains(&entry) || !entry.geometry->getVertexArray()
+                        || entry.geometry->getVertexArray()->getNumElements() != drawable.mSourceVertexCount) continue;
+                    if (drawable.mVertices.size() > compatibilityBudget)
+                        throw std::runtime_error("Static released equipment compatibility budget exceeded");
+                    compatibilityBudget -= drawable.mVertices.size();
+                    if (!MWRender::releasedEquipmentStaticVerticesMatch(*entry.geometry, drawable)) continue;
+                    if (found) throw std::runtime_error("Ambiguous static released equipment source geometry");
+                    found = &entry;
+                }
+                nativeStaticArrays = found != nullptr;
+            }
+            if (!found || !used.insert(found).second)
+                throw std::runtime_error("Released equipment source mesh changed or is unavailable");
+
+            osg::ref_ptr<osg::Geometry> geometry = new osg::Geometry(*found->geometry, osg::CopyOp::SHALLOW_COPY);
+            geometry->setUserDataContainer(found->geometry->getUserDataContainer()
+                ? static_cast<osg::UserDataContainer*>(found->geometry->getUserDataContainer()->clone(osg::CopyOp::SHALLOW_COPY))
+                : new osg::DefaultUserDataContainer);
+            geometry->getOrCreateUserDataContainer()->addUserObject(new Resource::TemplateRef(found->geometry));
+            osg::ref_ptr<osg::VertexBufferObject> vbo = new osg::VertexBufferObject;
+            vbo->setUsage(GL_STATIC_DRAW_ARB);
+            geometry->setSupportsDisplayList(false);
+            geometry->setUseVertexBufferObjects(true);
+            osg::ref_ptr<osg::Vec3Array> positions = new osg::Vec3Array;
+            positions->setVertexBufferObject(vbo);
+            positions->reserve(drawable.mVertices.size());
+            if (nativeStaticArrays)
+                *positions = *static_cast<const osg::Vec3Array*>(found->geometry->getVertexArray());
+            else for (const auto& v : drawable.mVertices)
+                    positions->push_back(osg::Vec3f(v[0], v[1], v[2]));
+            positions->setVertexBufferObject(vbo);
+            geometry->setVertexArray(positions);
+            osg::ref_ptr<osg::Vec3Array> normals = new osg::Vec3Array;
+            normals->setVertexBufferObject(vbo);
+            if (nativeStaticArrays && !drawable.mNormals.empty())
+                *normals = *static_cast<const osg::Vec3Array*>(found->geometry->getNormalArray());
+            else for (const auto& v : drawable.mNormals)
+                    normals->push_back(osg::Vec3f(v[0], v[1], v[2]));
+            normals->setVertexBufferObject(vbo);
+            if (drawable.mNormals.empty())
+                geometry->setNormalArray(nullptr, osg::Array::BIND_OFF);
+            else
+                geometry->setNormalArray(normals, drawable.mNormals.size() == 1
+                    ? osg::Array::BIND_OVERALL : osg::Array::BIND_PER_VERTEX);
+            if (!drawable.mTangents.empty())
+            {
+                osg::ref_ptr<osg::Vec4Array> tangents = new osg::Vec4Array;
+                tangents->setVertexBufferObject(vbo);
+                if (nativeStaticArrays)
+                    *tangents = *static_cast<const osg::Vec4Array*>(found->geometry->getTexCoordArray(7));
+                else for (const auto& v : drawable.mTangents)
+                        tangents->push_back(osg::Vec4f(v[0], v[1], v[2], v[3]));
+                tangents->setVertexBufferObject(vbo);
+                geometry->setTexCoordArray(7, tangents, osg::Array::BIND_PER_VERTEX);
+            }
+            else
+                geometry->setTexCoordArray(7, nullptr);
+            geometry->setStateSet(found->geometry->getStateSet()
+                ? new osg::StateSet(*found->geometry->getStateSet(), osg::CopyOp::SHALLOW_COPY)
+                : new osg::StateSet);
+            geometry->setUpdateCallback(nullptr);
+            geometry->setCullCallback(nullptr);
+            geometry->setComputeBoundingBoxCallback(nullptr);
+            geometry->setComputeBoundingSphereCallback(nullptr);
+            geometry->setDataVariance(osg::Object::STATIC);
+            geometry->dirtyBound();
+
+            // Keep the source material/texture hierarchy and the exact evaluated
+            // residual affine. This also preserves the normal-map basis under
+            // race scaling/reflection; a baked orthogonal TBN cannot do that.
+            osg::Group* parent = result;
+            for (const auto* node : found->path)
+            {
+                if (node == found->geometry.get())
+                    continue;
+                if (const auto* state = node->getStateSet())
+                {
+                    osg::ref_ptr<osg::Group> layer = new osg::Group;
+                    layer->setStateSet(const_cast<osg::StateSet*>(state));
+                    parent->addChild(layer);
+                    parent = layer;
+                }
+            }
+            geometry->getOrCreateStateSet()->setAttributeAndModes(
+                new osg::FrontFace(drawable.mClockwise ? osg::FrontFace::CLOCKWISE : osg::FrontFace::COUNTER_CLOCKWISE),
+                osg::StateAttribute::ON | osg::StateAttribute::OVERRIDE);
+            osg::ref_ptr<osg::MatrixTransform> affine
+                = new osg::MatrixTransform(osg::Matrixf(drawable.mTransform.data()));
+            parent->addChild(affine);
+            affine->addChild(geometry);
+        }
+        return result;
+    }
+
     /// Removes all particle systems and related nodes in a subgraph.
     class RemoveParticlesVisitor : public osg::NodeVisitor
     {
@@ -570,8 +1284,10 @@ namespace MWRender
 
     void Animation::setActive(int active)
     {
+        mRequestedActive = active;
         if (mSkeleton)
-            mSkeleton->setActive(static_cast<SceneUtil::Skeleton::ActiveType>(active));
+            mSkeleton->setActive(mRagdollPose && active > 0 ? SceneUtil::Skeleton::Active
+                : static_cast<SceneUtil::Skeleton::ActiveType>(active));
     }
 
     void Animation::updatePtr(const MWWorld::Ptr& ptr)
@@ -617,6 +1333,27 @@ namespace MWRender
     const SceneUtil::TextKeyMap& Animation::AnimSource::getTextKeys() const
     {
         return mKeyframes->mTextKeys;
+    }
+
+    std::pair<float, float> Animation::getLoopRange(const AnimState& state) const
+    {
+        float loopStart = state.mStartTime;
+        float loopStop = state.mStopTime;
+        if (state.mSource)
+        {
+            for (const auto& [time, text] : state.mSource->getTextKeys())
+            {
+                if (time < state.mStartTime || time > state.mStopTime)
+                    continue;
+                if (equalsParts(text, state.mGroupname, ": loop start"))
+                    loopStart = time;
+                else if (equalsParts(text, state.mGroupname, ": loop stop"))
+                    loopStop = time;
+            }
+        }
+        if (loopStop < loopStart)
+            return { state.mStartTime, state.mStopTime };
+        return { loopStart, loopStop };
     }
 
     void Animation::loadAdditionalAnimations(VFS::Path::NormalizedView model, const std::string& baseModel)
@@ -680,8 +1417,12 @@ namespace MWRender
             NodeMap::const_iterator found = nodeMap.find(bonename);
             if (found == nodeMap.end())
             {
-                Log(Debug::Warning) << "Warning: addAnimSource: can't find bone '" + bonename << "' in " << baseModel
-                                    << " (referenced by " << kfname << ")";
+                // Common and harmless: many vanilla .kf animations reference bones (toes,
+                // individual finger joints, ...) that a given skeleton/anim-source legitimately
+                // doesn't have; the track for the missing bone is simply skipped. Logged at Debug
+                // so it doesn't spam the normal log - run with verbose logging to see these.
+                Log(Debug::Debug) << "addAnimSource: can't find bone '" + bonename << "' in " << baseModel
+                                  << " (referenced by " << kfname << ")";
                 continue;
             }
 
@@ -731,8 +1472,24 @@ namespace MWRender
             }
         }
 
-        // Get the blending rules
-        if (useSmoothAnimationTransitions())
+        // This private NPC import opts into its own authored transition rules.
+        // Do not enable global vanilla/player smoothing or inherit global rules.
+        const bool importedNpc = mPtr.getClass().isNpc()
+            && mPtr != MWBase::Environment::get().getWorld()->getPlayerPtr()
+            && kfname.starts_with("animations/brutal_npc/");
+        // Weapon families opt only their first-person arm tracks into local
+        // source fade rules. Never turn on global smoothing for their camera,
+        // root, classic animations or other actors.
+        const bool importedFamily = mPtr == MWBase::Environment::get().getWorld()->getPlayerPtr()
+            && (kfname.starts_with("animations/brutal_fp/")
+                || kfname.starts_with("animations/brutal_fp_shield/")
+                || kfname.starts_with("animations/brutal_fp_staff/")
+                || kfname.starts_with("animations/brutal_fp_dagger/"));
+        animsrc->mImportedFamilyArms = importedFamily;
+        animsrc->mImportedFarArms = importedFamily
+            && (kfname.starts_with("animations/brutal_fp_staff/") || kfname.starts_with("animations/brutal_fp_dagger/"));
+        animsrc->mImportedDaggerArms = importedFamily && kfname.starts_with("animations/brutal_fp_dagger/");
+        if (useSmoothAnimationTransitions() || importedNpc || importedFamily)
         {
             constexpr VFS::Path::ExtensionView yaml("yaml");
 
@@ -745,7 +1502,12 @@ namespace MWRender
             constexpr VFS::Path::NormalizedView globalBlendConfigPath("animations/animation-config.yaml");
 
             osg::ref_ptr<const SceneUtil::AnimBlendRules> blendRules;
-            if (mPtr.getClass().isActor())
+            if (importedNpc || importedFamily)
+            {
+                blendRules = mResourceSystem->getAnimBlendRulesManager()->getRules(blendConfigPath, blendConfigPath);
+                animsrc->mImportedNpcBlending = importedNpc && blendRules != nullptr;
+            }
+            else if (mPtr.getClass().isActor())
             {
                 blendRules
                     = mResourceSystem->getAnimBlendRulesManager()->getRules(globalBlendConfigPath, blendConfigPath);
@@ -768,6 +1530,15 @@ namespace MWRender
     void Animation::clearAnimSources()
     {
         mStates.clear();
+        for (const auto& [name, node] : mNodeMap)
+        {
+            osg::UserDataContainer* data = node->getUserDataContainer();
+            if (!data)
+                continue;
+            for (unsigned int i = data->getNumUserObjects(); i-- > 0;)
+                if (dynamic_cast<DaggerItemState*>(data->getUserObject(i)))
+                    data->removeUserObject(i);
+        }
 
         for (size_t i = 0; i < sNumBlendMasks; i++)
             mAnimationTimePtr[i]->setTimePtr(std::shared_ptr<float>());
@@ -834,6 +1605,22 @@ namespace MWRender
         return -1.f;
     }
 
+    bool Animation::activeSourceHasTextKey(std::string_view owner, std::string_view key) const
+    {
+        for (auto source = mAnimSources.rbegin(); source != mAnimSources.rend(); ++source)
+        {
+            bool ownerFound = false, keyFound = false;
+            for (const auto& [time, text] : (*source)->getTextKeys())
+            {
+                ownerFound = ownerFound || text.starts_with(owner);
+                keyFound = keyFound || text.starts_with(key);
+            }
+            if (ownerFound)
+                return keyFound;
+        }
+        return false;
+    }
+
     float Animation::getTextKeyTime(std::string_view textKey) const
     {
         for (AnimSourceList::const_reverse_iterator iter(mAnimSources.rbegin()); iter != mAnimSources.rend(); ++iter)
@@ -879,8 +1666,18 @@ namespace MWRender
         float speedmult, std::string_view start, std::string_view stop, float startpoint, uint32_t loops,
         bool loopfallback)
     {
-        if (!mObjectRoot || mAnimSources.empty())
+        if (mRagdollPose || !mObjectRoot || mAnimSources.empty())
             return;
+
+        if (!groupname.empty() && !groupname.starts_with("brutal_clinch") && !mPtr.isEmpty()
+            && mPtr.getClass().isActor())
+        {
+            const auto& stats = mPtr.getClass().getCreatureStats(mPtr);
+            // A Lua action may have been queued before the parry. The relation
+            // claims the pose immediately, including the deferred entry frame.
+            if (stats.mBrutalClinchActive || !stats.mBrutalClinchOpponent.isEmpty())
+                return;
+        }
 
         if (groupname.empty())
         {
@@ -930,6 +1727,12 @@ namespace MWRender
                 state.mGroupname = groupname;
                 state.mStartKey = start;
                 state.mStopKey = stop;
+                if (state.mSource->mImportedDaggerArms)
+                {
+                    auto& entries = state.mSource->mDaggerClockStarts;
+                    std::erase_if(entries, [](const auto& entry) { return entry.first.expired(); });
+                    entries.emplace(state.mTime, state.getTime());
+                }
                 mStates[std::string{ groupname }] = state;
 
                 if (state.mPlaying)
@@ -991,11 +1794,16 @@ namespace MWRender
 
         auto stopkey = groupend;
         std::size_t checkLength = groupname.size() + 2 + stop.size();
-        while (stopkey != keys.rend()
+        const auto matchesStop = [&](std::string_view key) {
             // We have to ignore extra garbage at the end.
             // The Scrib's idle3 animation has "Idle3: Stop." instead of "Idle3: Stop".
             // Why, just why? :(
-            && !equalsParts(std::string_view{ stopkey->second }.substr(0, checkLength), groupname, ": ", stop))
+            if (!equalsParts(key.substr(0, checkLength), groupname, ": ", stop))
+                return false;
+            // But "hit" must not stop at "hit2": a whole word, not the start of a longer key.
+            return key.size() <= checkLength || !std::isalnum(static_cast<unsigned char>(key[checkLength]));
+        };
+        while (stopkey != keys.rend() && !matchesStop(stopkey->second))
             ++stopkey;
         if (stopkey == keys.rend())
             return false;
@@ -1037,6 +1845,119 @@ namespace MWRender
         return true;
     }
 
+    // getBoneWorldMatrix, setBoneWorldMatrix and stopAllAnimations are
+    // derived from sunspotdark/morrowind-modern-physics
+    // (https://github.com/sunspotdark/morrowind-modern-physics, commit eb50a40), GPLv3.
+    std::optional<osg::Matrixf> Animation::getBoneWorldMatrix(std::string_view bone) const
+    {
+        const auto found = getNodeMap().find(std::string(bone));
+        if (found == getNodeMap().end())
+            return std::nullopt;
+        const osg::NodePathList paths = found->second->getParentalNodePaths();
+        if (paths.empty())
+            return std::nullopt;
+        return osg::computeLocalToWorld(paths.front());
+    }
+
+    void Animation::setBoneWorldMatrix(std::string_view bone, const osg::Matrixf& world)
+    {
+        const auto found = getNodeMap().find(std::string(bone));
+        if (found == getNodeMap().end())
+            return;
+        osg::NodePathList paths = found->second->getParentalNodePaths();
+        if (paths.empty())
+            return;
+        osg::NodePath& toParent = paths.front();
+        toParent.pop_back();
+        found->second->setMatrix(world * osg::Matrixf::inverse(osg::computeLocalToWorld(toParent)));
+    }
+
+    void Animation::stopAllAnimations()
+    {
+        mStates.clear();
+        // Explicit teardown drops pose history; ordinary controller refreshes
+        // may briefly have no states between disabling movement and replaying idle.
+        if (!Settings::game().mSmoothAnimTransitions
+            && mPtr == MWBase::Environment::get().getWorld()->getPlayerPtr())
+            mAnimBlendControllers.clear();
+        resetActiveGroups();
+    }
+
+    namespace
+    {
+        class RagdollRecovery final : public osg::NodeCallback
+        {
+            osg::Matrixf mFrom,mFallback;
+            std::shared_ptr<float> mProgress;
+            bool mDriven=false;
+        public:
+            RagdollRecovery(const osg::Matrixf& from, const osg::Matrixf& fallback, std::shared_ptr<float> progress)
+                :mFrom(from),mFallback(fallback),mProgress(std::move(progress)) {}
+            void setDriven(bool value) {mDriven=value;}
+            void finish(osg::MatrixTransform* node) {if (!mDriven) node->setMatrix(mFallback);}
+            void operator()(osg::Node* node, osg::NodeVisitor* visitor) override
+            {
+                // Keyframe/rotation callbacks precede this appended callback.
+                auto* transform=static_cast<osg::MatrixTransform*>(node);
+                if (*mProgress<1.f)
+                {
+                    const osg::Matrixf target=mDriven?osg::Matrixf(transform->getMatrix()):mFallback;
+                    osg::Vec3f p0,s0,p1,s1;osg::Quat q0,q1,so0,so1;
+                    mFrom.decompose(p0,q0,s0,so0);target.decompose(p1,q1,s1,so1);
+                    const auto fromStretch=mFrom*osg::Matrixf::inverse(osg::Matrixf::rotate(q0)*osg::Matrixf::translate(p0));
+                    const auto toStretch=target*osg::Matrixf::inverse(osg::Matrixf::rotate(q1)*osg::Matrixf::translate(p1));
+                    const float w=*mProgress;osg::Quat q;q.slerp(w,q0,q1);
+                    osg::Matrixf stretch;
+                    for (int row=0;row<3;++row) for (int col=0;col<3;++col)
+                        stretch(row,col)=fromStretch(row,col)*(1-w)+toStretch(row,col)*w;
+                    transform->setMatrix(stretch*osg::Matrixf::rotate(q)*osg::Matrixf::translate(p0*(1-w)+p1*w));
+                }
+                traverse(node,visitor);
+            }
+        };
+    }
+
+    void Animation::beginRagdollPose()
+    {
+        restoreTransientPose();
+        if (mRagdollPose)
+            return;
+        for (const auto& [node,callback]:mRagdollRecoveryControllers) node->removeUpdateCallback(callback);
+        mRagdollRecoveryControllers.clear();mRagdollRecoveryProgress.reset();
+        mRagdollLocalPose.clear();
+        for (const auto& [name, node] : getNodeMap())
+            mRagdollLocalPose.emplace_back(node, node->getMatrix());
+        mRagdollPose = true;
+        stopAllAnimations();
+        setActive(mRequestedActive);
+    }
+
+    void Animation::endRagdollPose(float recoveryDuration)
+    {
+        if (!mRagdollPose)
+            return;
+        ActiveControllersVector recovery;
+        if (recoveryDuration>0.f)
+        {
+            mRagdollRecoveryProgress=std::make_shared<float>(0.f);
+            mRagdollRecoveryDuration=recoveryDuration;
+            for (const auto& [node,local]:mRagdollLocalPose)
+                recovery.emplace_back(node,new RagdollRecovery(node->getMatrix(),local,mRagdollRecoveryProgress));
+        }
+        // Raw matrix updates leave NIF mScale/mRotationScale untouched. Restore the
+        // original matrices before allowing their component-based controllers back.
+        for (const auto& [node, local] : mRagdollLocalPose)
+            node->setMatrix(local);
+        mRagdollLocalPose.clear();
+        mRagdollPose = false;
+        resetActiveGroups();
+        for (const auto& [node,callback]:recovery) node->addUpdateCallback(callback);
+        mRagdollRecoveryControllers=std::move(recovery);
+        setActive(mRequestedActive);
+        if (mSkeleton)
+            mSkeleton->markDirty();
+    }
+
     void Animation::setTextKeyListener(TextKeyListener* listener)
     {
         mTextKeyListener = listener;
@@ -1060,6 +1981,43 @@ namespace MWRender
             mNodeMapCreated = true;
         }
         return mNodeMap;
+    }
+
+    namespace
+    {
+        osg::ref_ptr<const SceneUtil::AnimBlendRules> primaryCrouchBlendRules(
+            const osg::ref_ptr<const SceneUtil::AnimBlendRules>& base, bool cameraAncestor)
+        {
+            using Rule = SceneUtil::AnimBlendRules::BlendRule;
+            osg::ref_ptr<SceneUtil::AnimBlendRules> rules = base
+                ? new SceneUtil::AnimBlendRules(*base, osg::CopyOp::SHALLOW_COPY)
+                : new SceneUtil::AnimBlendRules;
+            std::vector<Rule> overrides{
+                {"idlesneak*", "", "*", "", .22f, "sineInOut", false},
+                {"sneak*", "", "*", "", .22f, "sineInOut", false},
+                {"*", "", "idlesneak*", "", .22f, "sineInOut", false},
+                {"*", "", "sneak*", "", .22f, "sineInOut", false},
+            };
+            if (cameraAncestor)
+                // Stock unarmed locomotion has no Camera track: its torso keys
+                // move the inherited eye from the calibrated imported idle.
+                // Fade those raw ancestors too, preserving the target framing.
+                for (const auto* from : {"idle*", "walk*", "run*"})
+                    for (const auto* to : {"idle*", "walk*", "run*"})
+                        overrides.push_back({from, "", to, "", .22f, "sineInOut", false});
+            overrides.push_back({"", "", "*", "", 0.f, "linear", false});
+            rules->addOverrideRules(SceneUtil::AnimBlendRules(overrides));
+            return rules;
+        }
+
+        osg::ref_ptr<const SceneUtil::AnimBlendRules> bodyCrouchBlendRules(
+            const osg::ref_ptr<const SceneUtil::AnimBlendRules>& base)
+        {
+            // Preserve an explicitly enabled global body transition policy. With
+            // no base rule the blend controller already defaults to duration zero.
+            return primaryCrouchBlendRules(base, false);
+        }
+
     }
 
 //## VR_PATCH BEGIN
@@ -1136,6 +2094,16 @@ namespace MWRender
 
     void Animation::resetActiveGroups()
     {
+        if (mDeferActiveGroupReset)
+        {
+            mDeferredActiveGroupReset = true;
+            return;
+        }
+        mDeferredActiveGroupReset = false;
+        restoreTransientPose();
+        for (const auto& [node,callback]:mRagdollRecoveryControllers) node->removeUpdateCallback(callback);
+        if (mRagdollPose)
+            mStates.clear();
 //## VR_PATCH BEGIN
         const bool isPlayer = (mPtr == MWMechanics::getPlayer());
 
@@ -1153,6 +2121,17 @@ namespace MWRender
         mActiveControllers.clear();
 
         mAccumCtrl = nullptr;
+
+        if (mRagdollPose && !Settings::game().mSmoothAnimTransitions
+            && mPtr == MWBase::Environment::get().getWorld()->getPlayerPtr())
+            mAnimBlendControllers.clear(); // ragdoll cannot leave a scoped arm group cached.
+
+        if (mRagdollPose)
+        {
+            for (auto& time : mAnimationTimePtr)
+                time->setTimePtr(std::shared_ptr<float>());
+            return; // addControllers also attaches head/spine rotations: keep those suspended.
+        }
 
         for (size_t blendMask = 0; blendMask < sNumBlendMasks; blendMask++)
         {
@@ -1177,7 +2156,24 @@ namespace MWRender
             {
                 std::shared_ptr<AnimSource> animsrc = active->second.mSource;
                 const AnimBlendStateData stateData
-                    = { .mGroupname = active->second.mGroupname, .mStartKey = active->second.mStartKey };
+                    = { .mGroupname = active->second.mGroupname, .mStartKey = active->second.mStartKey,
+                          .mStartTime = active->second.mStartTime };
+                const bool player = mPtr == MWBase::Environment::get().getWorld()->getPlayerPtr();
+                const bool playerArm = player
+                    && (blendMask == BoneGroup_LeftArm || blendMask == BoneGroup_RightArm);
+                const bool slideArmState = isSlideArmBlendState(playerArm, blendMask, stateData.mGroupname,
+                    playerArm && mPtr.getClass().getCreatureStats(mPtr).mBrutalSlideAttack);
+
+                const bool clinchState = player
+                    && (stateData.mGroupname.starts_with("brutal_clinch")
+                        || mPtr.getClass().getCreatureStats(mPtr).mBrutalClinchActive
+                        || mPtr.getClass().getCreatureStats(mPtr).mBrutalClinchBlendOut > 0.f);
+                const bool clinchArmState = playerArm && clinchState;
+                const bool familyArmState = playerArm && animsrc->mImportedFamilyArms;
+                // Keep the body callbacks even outside crouch so a return to standing
+                // captures the last displayed pose instead of recreating a raw controller.
+                const bool bodyCrouchState = useBodyCrouchTransitions();
+                const bool primaryCrouchState = usePrimaryCrouchTransitions();
 
                 for (AnimSource::ControllerMap::iterator it = animsrc->mControllerMap[blendMask].begin();
                      it != animsrc->mControllerMap[blendMask].end(); ++it)
@@ -1185,21 +2181,109 @@ namespace MWRender
                     osg::ref_ptr<osg::Node> node = getNodeMap().at(
                         it->first); // this should not throw, we already checked for the node existing in addAnimSource
 
-                    const bool useSmoothAnims = useSmoothAnimationTransitions();
+        const bool useSmoothAnims = useSmoothAnimationTransitions() || animsrc->mImportedNpcBlending;
 
                     osg::Callback* callback = it->second->getAsCallback();
-                    if (useSmoothAnims)
+                    // Keep a newly created item callback alive until the node
+                    // takes its reference below, outside the NIF branch.
+                    osg::ref_ptr<osg::Callback> independentItemCallback;
+                    // The private first-person arm rig uses NIF transforms. Keep
+                    // slide joins local to those arms; body/root/camera and the
+                    // existing global/imported-NPC blending path are unchanged.
+                    if (dynamic_cast<NifOsg::MatrixTransform*>(node.get()))
                     {
-                        if (dynamic_cast<NifOsg::MatrixTransform*>(node.get()))
+                        // Neck has an aimed-pivot RotateController applied after its raw
+                        // KF. Never capture that already-aimed translation into a second fade.
+                        const bool primaryCameraAncestor = Misc::StringUtils::ciEqual(it->first, "Camera")
+                            || Misc::StringUtils::ciEqual(it->first, "Bip01 Pelvis")
+                            || Misc::StringUtils::ciEqual(it->first, "Bip01 Spine")
+                            || Misc::StringUtils::ciEqual(it->first, "Bip01 Spine1")
+                            || Misc::StringUtils::ciEqual(it->first, "Bip01 Spine2");
+                        const bool primaryCrouchNode = primaryCrouchState && (playerArm || primaryCameraAncestor);
+                        // A dagger's contest flip is its own authored motion: blending the item
+                        // bone would turn it 180 degrees through the arm fade.
+                        const bool item = Misc::StringUtils::ciEqual(it->first, "Weapon Bone")
+                            || Misc::StringUtils::ciEqual(it->first, "Brutal Left Weapon");
+                        const bool clinchItem = clinchArmState && animsrc->mImportedFarArms && item;
+                        // Guard entry orders the dagger entity's own .042-second flip before
+                        // the arm's .2-second fade. Keep its source clock, including the
+                        // independent default-grip reset on lowering the guard.
+                        const bool daggerGuardItem = playerArm && animsrc->mImportedDaggerArms && item
+                            && (stateData.mGroupname.starts_with("brutal_block")
+                                || stateData.mGroupname == "brutal_parrybreak");
+                        bool independentDaggerItem = false;
+                        if (playerArm && animsrc->mImportedDaggerArms && item)
                         {
+                            osg::ref_ptr<DaggerItemState> itemState;
+                            osg::UserDataContainer* data = node->getOrCreateUserDataContainer();
+                            for (unsigned int i = 0; i < data->getNumUserObjects(); ++i)
+                                if (auto* found = dynamic_cast<DaggerItemState*>(data->getUserObject(i)))
+                                    itemState = found;
+                            if (!itemState)
+                                itemState = new DaggerItemState;
+                            const AnimState& itemOwner = active->second;
+                            const auto initial = animsrc->mDaggerClockStarts.find(itemOwner.mTime);
+                            const float itemEntry = initial == animsrc->mDaggerClockStarts.end()
+                                ? itemOwner.mStartTime : initial->second;
+                            NifOsg::MatrixTransform* armFrame = nullptr;
+                            const std::string frameKey = itemOwner.mGroupname + ": dagger arm frame";
+                            if (std::any_of(animsrc->getTextKeys().begin(), animsrc->getTextKeys().end(),
+                                    [&](const auto& key) { return key.second == frameKey; }))
+                            {
+                                const bool right = Misc::StringUtils::ciEqual(it->first, "Weapon Bone");
+                                const auto frame = getNodeMap().find(
+                                    right ? "Brutal Right Dagger Frame" : "Brutal Left Dagger Frame");
+                                if (frame != getNodeMap().end())
+                                    armFrame = dynamic_cast<NifOsg::MatrixTransform*>(frame->second.get());
+                            }
+                            osg::ref_ptr<DaggerItemController> itemController = new DaggerItemController(it->second,
+                                itemState, itemOwner.mTime, animsrc->getTextKeys(), itemOwner.mGroupname,
+                                itemOwner.mStartTime, itemEntry, itemOwner.mStopTime,
+                                itemOwner.mLoopStartTime, itemOwner.mLoopStopTime,
+                                Misc::StringUtils::ciEqual(it->first, "Weapon Bone"), armFrame);
+                            if (itemController->valid())
+                            {
+                                bool stored = false;
+                                for (unsigned int i = 0; i < data->getNumUserObjects(); ++i)
+                                    stored = stored || data->getUserObject(i) == itemState;
+                                if (!stored)
+                                    data->addUserObject(itemState);
+                                independentItemCallback = itemController;
+                                callback = independentItemCallback;
+                                independentDaggerItem = true;
+                            }
+                        }
+                        else if (item && node->getUserDataContainer())
+                        {
+                            // A different family now owns the mount. Its next
+                            // dagger draw starts a new independent item state.
+                            osg::UserDataContainer* data = node->getUserDataContainer();
+                            for (unsigned int i = data->getNumUserObjects(); i-- > 0;)
+                                if (dynamic_cast<DaggerItemState*>(data->getUserObject(i)))
+                                    data->removeUserObject(i);
+                        }
+                        if (!clinchItem && !daggerGuardItem && !independentDaggerItem
+                            && (useSmoothAnims || slideArmState || clinchArmState || familyArmState || bodyCrouchState || primaryCrouchNode))
+                        {
+                            auto rules = bodyCrouchState ? bodyCrouchBlendRules(useSmoothAnims ? animsrc->mAnimBlendRules : nullptr) : clinchArmState ? (animsrc->mImportedFarArms ? familyClinchArmBlendRules() : clinchArmBlendRules())
+                                : useSmoothAnims ? animsrc->mAnimBlendRules
+                                : slideArmState ? slideArmBlendRules(stateData.mGroupname, stateData.mStartKey)
+                                : familyArmState ? animsrc->mAnimBlendRules : nullptr;
+                            if (primaryCrouchNode)
+                                rules = primaryCrouchBlendRules(rules, primaryCameraAncestor);
                             callback = handleBlendTransform<NifAnimBlendController>(node, it->second,
-                                mAnimBlendControllers, stateData, animsrc->mAnimBlendRules, active->second);
+                                mAnimBlendControllers, stateData, rules, active->second);
                         }
-                        else if (dynamic_cast<osgAnimation::Bone*>(node.get()))
-                        {
-                            callback = handleBlendTransform<BoneAnimBlendController>(node, it->second,
-                                mBoneAnimBlendControllers, stateData, animsrc->mAnimBlendRules, active->second);
-                        }
+                        else if (playerArm)
+                            // Old callbacks were removed above. A kick, ordinary
+                            // idle or another action now owns these nodes directly;
+                            // no stale slide interpolation/group survives to return.
+                            mAnimBlendControllers.erase(node);
+                    }
+                    else if (useSmoothAnims && dynamic_cast<osgAnimation::Bone*>(node.get()))
+                    {
+                        callback = handleBlendTransform<BoneAnimBlendController>(node, it->second,
+                            mBoneAnimBlendControllers, stateData, animsrc->mAnimBlendRules, active->second);
                     }
 //## VR_PATCH BEGIN
                     // Some bones need to be still and do nothing in VR
@@ -1227,6 +2311,13 @@ namespace MWRender
         }
 
         addControllers();
+        for (const auto& [node,callback]:mRagdollRecoveryControllers)
+        {
+            const bool driven=std::any_of(mActiveControllers.begin(),mActiveControllers.end(),
+                [&](const auto& item){return item.first==node;});
+            dynamic_cast<RagdollRecovery*>(callback.get())->setDriven(driven);
+            node->addUpdateCallback(callback);
+        }
     }
 
     void Animation::adjustSpeedMult(const std::string& groupname, float speedmult)
@@ -1296,6 +2387,11 @@ namespace MWRender
             animationEnded(iter->second);
             mStates.erase(iter);
         }
+        resetActiveGroups();
+    }
+
+    void Animation::disableAllAnimations()
+    {
         resetActiveGroups();
     }
 
@@ -1369,6 +2465,19 @@ namespace MWRender
 
     osg::Vec3f Animation::runAnimation(float duration)
     {
+        if (mRagdollRecoveryProgress)
+        {
+            *mRagdollRecoveryProgress=std::min(1.f,*mRagdollRecoveryProgress+duration/mRagdollRecoveryDuration);
+            if (*mRagdollRecoveryProgress>=1.f)
+            {
+                for (const auto& [node,callback]:mRagdollRecoveryControllers)
+                {
+                    dynamic_cast<RagdollRecovery*>(callback.get())->finish(static_cast<osg::MatrixTransform*>(node.get()));
+                    node->removeUpdateCallback(callback);
+                }
+                mRagdollRecoveryControllers.clear();mRagdollRecoveryProgress.reset();
+            }
+        }
         osg::Vec3f movement(0.f, 0.f, 0.f);
         AnimStateMap::iterator stateiter = mStates.begin();
         while (stateiter != mStates.end())
@@ -1578,8 +2687,12 @@ namespace MWRender
         }
     }
 
-    void Animation::setObjectRoot(const std::string& model, bool forceskeleton, bool baseonly, bool isCreature)
+    void Animation::setObjectRoot(
+        const std::string& model, bool forceskeleton, bool baseonly, bool isCreature, bool enableJiggleBones)
     {
+        // A rebuilt skeleton must not retain snapshots of detached nodes.
+        // World resumes ownership if the actor still has an active ragdoll.
+        endRagdollPose();
         osg::ref_ptr<osg::StateSet> previousStateset;
         if (mObjectRoot)
         {
@@ -1596,6 +2709,10 @@ namespace MWRender
         mNodeMap.clear();
         mNodeMapCreated = false;
         mActiveControllers.clear();
+        // These maps own node references. A family/equipment rebuild replaces
+        // every node, so cached blends must not keep the detached rig alive.
+        mAnimBlendControllers.clear();
+        mBoneAnimBlendControllers.clear();
         mAccumRoot = nullptr;
         mAccumCtrl = nullptr;
 
@@ -1689,6 +2806,126 @@ namespace MWRender
         mObjectRoot->addCullCallback(mLightListCallback);
         if (mTransparencyUpdater)
             mObjectRoot->addCullCallback(mTransparencyUpdater);
+
+        // Jiggle bones are character-body behavior. Keep them off generic animated
+        // objects and creatures; NpcAnimation opts in for both NPCs and the player.
+        if (enableJiggleBones)
+            attachJiggleBoneControllers();
+    }
+
+    void Animation::attachJiggleBoneControllers()
+    {
+        // Equipment can inject BONE-marked secondary-motion chains after the
+        // actor root has already been created. Always refresh the cached node
+        // map before scanning, and make repeated scans idempotent below.
+        mNodeMap.clear();
+        mNodeMapCreated = false;
+
+        static constexpr std::string_view legacyBoneNames[] = {
+            "bip01 l breast",
+            "bip01 r breast",
+            "bip01 l butt",
+            "bip01 r butt",
+        };
+        const bool debug = Settings::game().mJiggleBoneDebug;
+        const bool isPlayer = mPtr == MWBase::Environment::get().getWorld()->getPlayerPtr();
+        const std::string actorName = std::string(mPtr.getClass().getName(mPtr));
+        const bool jiggleActorEnabled
+            = Misc::JigglePolicy::actorEnabled(isPlayer, actorName, mPtr.getCellRef().getRefNum());
+
+        std::unordered_set<osg::MatrixTransform*> attached;
+
+        // Hair / cloth chains (physics-verlet). A root such as v_01 opts in with OPENMW_VERLET_CLOTH and
+        // verlet_count=N. All chains hanging from the same parent bone form one group that a single
+        // controller simulates together, so neighbouring chains move as one sheet. Chain bones must not
+        // also receive independent JiggleBoneControllers.
+        struct VerletGroup
+        {
+            std::vector<std::vector<osg::ref_ptr<osg::MatrixTransform>>> mChains;
+            osg::MatrixTransform* mFirstRoot = nullptr;
+            int mPin = 3;
+        };
+        std::map<const osg::Node*, VerletGroup> verletGroups;
+        for (const auto& [name, nodeRef] : getNodeMap())
+        {
+            osg::MatrixTransform* root = nodeRef.get();
+            if (!root || attached.contains(root) || hasSecondaryMotionController(root))
+                continue;
+            if (simulatedByGroupController(root))
+                continue;
+
+            const VerletRootInfo info = verletRootInfo(*root);
+            if (!info.mEnabled || info.mCount < 2)
+                continue;
+
+            const std::vector<std::string> chainNames = numberedVerletChainNames(root->getName(), info.mCount);
+            std::vector<osg::ref_ptr<osg::MatrixTransform>> chain;
+            bool complete = chainNames.size() == static_cast<std::size_t>(info.mCount);
+            for (const std::string& chainName : chainNames)
+            {
+                auto iter = getNodeMap().find(chainName);
+                if (iter == getNodeMap().end() || !iter->second)
+                {
+                    complete = false;
+                    if (debug)
+                        Log(Debug::Warning) << "Verlet cloth: missing chain bone " << chainName << " for root "
+                                            << root->getName();
+                    break;
+                }
+                chain.push_back(iter->second);
+            }
+            if (!complete || chain.size() < 2)
+                continue;
+
+            for (const auto& bone : chain)
+                attached.insert(bone.get());
+            const osg::Node* parent = root->getNumParents() > 0 ? root->getParent(0) : nullptr;
+            VerletGroup& group = verletGroups[parent];
+            if (!group.mFirstRoot)
+            {
+                group.mFirstRoot = root;
+                group.mPin = info.mPin;
+            }
+            group.mChains.push_back(std::move(chain));
+        }
+        for (auto& [parent, group] : verletGroups)
+        {
+            if (debug)
+                Log(Debug::Info) << "Verlet cloth: attached " << group.mChains.size() << " chains under "
+                                 << (parent ? parent->getName() : std::string("<none>"));
+            // water level of the actor's current cell (read every frame: the actor may change cells)
+            auto waterLevel = [this]() -> std::optional<float> {
+                if (mPtr.isEmpty() || !mPtr.isInCell() || !mPtr.getCell()->getCell()->hasWater())
+                    return std::nullopt;
+                return mPtr.getCell()->getWaterLevel();
+            };
+            group.mFirstRoot->addUpdateCallback(
+                new VerletClothController(std::move(group.mChains), group.mPin, debug, std::move(waterLevel)));
+        }
+
+        // Zero-setup behavior for traditional breast/butt bone names.
+        for (std::string_view bone : legacyBoneNames)
+        {
+            auto iter = getNodeMap().find(bone);
+            if (iter == getNodeMap().end())
+            {
+                if (debug)
+                    Log(Debug::Warning) << "Jiggle bone debug: not found: " << bone;
+                continue;
+            }
+
+            osg::MatrixTransform* node = iter->second;
+            if (attached.contains(node) || hasSecondaryMotionController(node))
+                continue;
+            if (!jiggleActorEnabled)
+                continue;
+
+            if (debug)
+                Log(Debug::Warning) << "Jiggle bone debug: found " << bone << " node=" << node
+                                    << " actor=" << actorName;
+            node->addUpdateCallback(
+                new JiggleBoneController(debug, isPlayer, actorName, mPtr.getCellRef().getRefNum()));
+        }
     }
 
     osg::Group* Animation::getObjectRoot()
@@ -2105,10 +3342,23 @@ namespace MWRender
         Resource::ResourceSystem* resourceSystem, bool animated, bool allowLight)
         : Animation(ptr, osg::ref_ptr<osg::Group>(ptr.getRefData().getBaseNode()), resourceSystem)
     {
-        if (!model.empty())
+        const auto& released = ptr.getRefData().getReleasedEquipment();
+        if (released || !model.empty())
         {
-            setObjectRoot(model, false, false, false);
-            if (animated)
+            setObjectRoot(released ? released->mModel : model, false, false, false);
+            if (released)
+            {
+                auto snapshot = restoreReleasedEquipment(*mObjectRoot, *released);
+                mInsert->removeChild(mObjectRoot);
+                mObjectRoot = std::move(snapshot);
+                mSkeleton = nullptr;
+                mNodeMap.clear();
+                mNodeMapCreated = false;
+                if (mLightListCallback)
+                    mObjectRoot->addCullCallback(mLightListCallback);
+                mInsert->addChild(mObjectRoot);
+            }
+            if (animated && !released)
                 addAnimSource(model, model);
 
             if (!ptr.getClass().getEnchantment(ptr).empty())

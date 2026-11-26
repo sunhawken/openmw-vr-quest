@@ -2,10 +2,11 @@
 
 set -e
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-cd $DIR
+cd "$DIR"
 
 export ARCH="arm64"
-export CCACHE="false"
+# Keep compiler outputs between builds. Set CCACHE=false to opt out.
+export CCACHE="${CCACHE:-true}"
 ASAN="false"
 DEPLOY_RESOURCES="true"
 LTO="false"
@@ -21,7 +22,7 @@ usage() {
 	echo "	--asan: build with AddressSanitizer enabled"
 	echo "	--no-resources: don't deploy the resources"
 	echo "	--lto: use LTO for linking"
-	echo "	--ccache: use ccache to speed up repeated builds"
+	echo "	--ccache: use ccache to speed up repeated builds (enabled by default)"
 	echo "	--debug: produce a debug build without optimizations"
 	echo "	--release: produce a release build with optimizations (default)"
 	exit 0
@@ -182,8 +183,9 @@ rm -rf ../app/wrap/
 rm -rf ../app/src/main/jniLibs/$ABI/
 mkdir -p ../app/src/main/jniLibs/$ABI/
 
-# libopenmw.so is a special case
-find build/$ARCH/openmw-prefix/ -iname "libopenmw.so" -exec cp "{}" ../app/src/main/jniLibs/$ABI/libopenmw.so \;
+# The Quest fork names the engine output libbrutalmorrowind.so; package it
+# under the stable library name the Android activity loads.
+find build/$ARCH/openmw-prefix/ -iname "libbrutalmorrowind.so" -exec cp "{}" ../app/src/main/jniLibs/$ABI/libopenmw.so \;
 
 # copy over libs we compiled
 cp prefix/$ARCH/lib/{libopenal,libSDL2,libGL}.so ../app/src/main/jniLibs/$ABI/
@@ -231,7 +233,7 @@ echo "==> Making your debugging life easier"
 rm -rf "./symbols/$ABI/" && mkdir -p "./symbols/$ABI/"
 cp "./build/$ARCH/openal-prefix/src/openal-build/libopenal.so" "./symbols/$ABI/"
 cp "./build/$ARCH/sdl2-prefix/src/sdl2-build/obj/local/$ABI/libSDL2.so" "./symbols/$ABI/"
-cp "./build/$ARCH/openmw-prefix/src/openmw-build/libopenmw.so" "./symbols/$ABI/libopenmw.so"
+cp "./build/$ARCH/openmw-prefix/src/openmw-build/libbrutalmorrowind.so" "./symbols/$ABI/libopenmw.so"
 cp "./build/$ARCH/gl4es-prefix/src/gl4es-build/obj/local/$ABI/libGL.so" "./symbols/$ABI/"
 cp "../app/src/main/jniLibs/$ABI/libc++_shared.so" "./symbols/$ABI/"
 

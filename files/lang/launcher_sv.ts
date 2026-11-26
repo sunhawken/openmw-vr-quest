@@ -300,6 +300,133 @@ de ordinarie fonterna i Morrowind. Bocka denna ruta om du ändå föredrar ordin
     </message>
 </context>
 <context>
+    <name>Launcher::DarkMessiahPage</name>
+    <message>
+        <source>Dark Messiah of Might and Magic</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Brutal Morrowind takes its combat animations, sounds and blood effects from your copy of Dark Messiah of Might and Magic. Nothing is copied from the game folder itself: the importer builds them once in your user data folder.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Dark Messiah folder (the one that holds vpks)</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Browse...</source>
+        <translation type="unfinished">Bläddra...</translation>
+    </message>
+    <message>
+        <source>Detect</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Imported data</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Import</source>
+        <translation type="unfinished">Importera</translation>
+    </message>
+    <message>
+        <source>Cancel</source>
+        <translation type="unfinished">Avbryt</translation>
+    </message>
+    <message>
+        <source>Without Dark Messiah the game uses Morrowind&apos;s animations, and the components that need Dark Messiah animations, sounds or textures are switched off.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Select the Dark Messiah of Might and Magic folder</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Dark Messiah not found</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Dark Messiah of Might and Magic was not found in your Steam libraries. Select its folder with Browse.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Not found. Select the game folder or press Detect.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Game files found.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>This folder has no Dark Messiah archives (vpks/*_dir.vpk).</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Imported and ready: %1</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Imported for an older version of Brutal Morrowind. Import again.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Not imported yet. The import takes about a minute.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Import again</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Select the Dark Messiah of Might and Magic folder first.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Morrowind.bsa was not found in your data folders. Set up Morrowind first.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>The importer is missing: %1</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Starting...</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Cancelling...</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Import finished.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Import cancelled.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Import failed.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Import failed</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>The Dark Messiah import failed. The log on the Dark Messiah page shows the reason.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>The importer could not be started: %1</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Dark Messiah import</source>
+        <translation type="unfinished"></translation>
+    </message>
+</context>
+<context>
     <name>Launcher::DataFilesPage</name>
     <message>
         <source>English</source>
@@ -472,7 +599,7 @@ de ordinarie fonterna i Morrowind. Bocka denna ruta om du ändå föredrar ordin
     </message>
     <message>
         <source>Launch OpenMW</source>
-        <translation>Starta OpenMW</translation>
+        <translation type="vanished">Starta OpenMW</translation>
     </message>
     <message>
         <source>Help</source>
@@ -570,6 +697,54 @@ de ordinarie fonterna i Morrowind. Bocka denna ruta om du ändå föredrar ordin
         <source>&lt;br&gt;&lt;b&gt;Could not create directory %0&lt;/b&gt;&lt;br&gt;&lt;br&gt;%1&lt;br&gt;</source>
         <translation>&lt;br&gt;&lt;b&gt;Kunde inte skapa katalog %0&lt;/b&gt;&lt;br&gt;&lt;br&gt;%1&lt;br&gt;</translation>
     </message>
+    <message>
+        <source>Play</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Dark Messiah</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Find Dark Messiah of Might and Magic and import its animations</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Dark Messiah import</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>The Dark Messiah import is still running. Cancel it and close the launcher?</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Dark Messiah data</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>&lt;b&gt;The Dark Messiah animations are not imported yet.&lt;/b&gt;&lt;br&gt;&lt;br&gt;Import them now? It takes about a minute. Without them the game uses Morrowind&apos;s animations and the Dark Messiah combat is off.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Import and play</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Play without</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Dark Messiah not found</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>&lt;b&gt;Dark Messiah of Might and Magic was not found.&lt;/b&gt;&lt;br&gt;&lt;br&gt;The game will use Morrowind&apos;s animations, and the components that need Dark Messiah animations, sounds or textures will be off. You can select the game folder on the Dark Messiah page.</source>
+        <translation type="unfinished"></translation>
+    </message>
+    <message>
+        <source>Do not ask again</source>
+        <translation type="unfinished"></translation>
+    </message>
 </context>
 <context>
     <name>Launcher::SettingsPage</name>
@@ -626,7 +801,7 @@ Loggar och inställningar som ändras genom startaren och inne i spelet kommer s
     <name>MainWindow</name>
     <message>
         <source>OpenMW Launcher</source>
-        <translation>OpenMW Startare</translation>
+        <translation type="vanished">OpenMW Startare</translation>
     </message>
     <message>
         <source>OpenMW version</source>
@@ -668,6 +843,10 @@ Loggar och inställningar som ändras genom startaren och inne i spelet kommer s
         <source>Allows to change display settings</source>
         <translation>Låter dig ändra bildinställningar</translation>
     </message>
+    <message>
+        <source>Brutal Morrowind Launcher</source>
+        <translation type="unfinished"></translation>
+    </message>
 </context>
 <context>
     <name>QObject</name>
@@ -707,7 +886,7 @@ Loggar och inställningar som ändras genom startaren och inne i spelet kommer s
     </message>
     <message>
         <source>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Stops combat with NPCs affected by Calm spells every frame -- like in Morrowind without the MCP.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</source>
-        <translation>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Avbryter strid med icke-spelbara figurer påverkade av &quot;Calm&quot;-besvjärjelser varje bildruta – såsom i Morrowind utan MCP.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</translation>
+        <translation>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Avbryter strid med bifigurer påverkade av &quot;Calm&quot;-besvjärjelser varje bildruta – såsom i Morrowind utan MCP.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</translation>
     </message>
     <message>
         <source>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Make the value of filled soul gems dependent only on soul magnitude.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</source>
@@ -719,15 +898,15 @@ Loggar och inställningar som ändras genom startaren och inne i spelet kommer s
     </message>
     <message>
         <source>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Make stealing items from NPCs that were knocked down possible during combat.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</source>
-        <translation>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Gör det möjligt att stjäla föremål från icke-spelbara figurer som är avsvimmade.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</translation>
+        <translation>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Gör det möjligt att stjäla föremål från bifigurer som är avsvimmade.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</translation>
     </message>
     <message>
         <source>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;a name=&quot;docs-internal-guid-f375b85a-7fff-02ff-a5af-c5cff63923c0&quot;/&gt;When enabled, a navigation mesh is built in the background for world geometry to be used for pathfinding. When disabled only the path grid is used to build paths. Single-core CPU systems may have a big performance impact on existing interior location and moving across the exterior world. May slightly affect performance on multi-core CPU systems. Multi-core CPU systems may have different latency for nav mesh update depending on other settings and system performance. Moving across external world, entering/exiting location produce nav mesh update. NPC and creatures may not be able to find path before nav mesh is built around them. Try to disable this if you want to have old fashioned AI which doesn&apos;t know where to go when you stand behind that stone and cast a firebolt.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</source>
-        <translation>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;a name=&quot;docs-internal-guid-f375b85a-7fff-02ff-a5af-c5cff63923c0&quot;/&gt;Om aktiv kommer en en navigeringsmesh av världsgeometrin byggas i bakgrunden som används för pathfinding. Om inaktiv kommer endast pathgrid användas för att bygga vägar. Enkelkärnade processorer kan få kraftigt försämrad prestanda. Kan påverka prestandan på flerkärniga processorer något. Flerkärniga processorer kan ha olika fördröjning för att uppdatera navigeringsmesh. Förflyttning mellan externa världar och att gå in eller ut ur en plats producerar en uppdatering av navigeringsmesh. Icke-spelbara figurer kan inte hitta vägar innan navigeringsmesh har skapats runt om dem. Testa att inaktivera denna funktion om du vill ha en mer gammaldags AI som inte vet var den ska gå när du står bakom den där stenen och skjuter ett eldklot.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</translation>
+        <translation>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;&lt;a name=&quot;docs-internal-guid-f375b85a-7fff-02ff-a5af-c5cff63923c0&quot;/&gt;Om aktiv kommer en en navigeringsmesh av världsgeometrin byggas i bakgrunden som används för pathfinding. Om inaktiv kommer endast pathgrid användas för att bygga vägar. Enkelkärnade processorer kan få kraftigt försämrad prestanda. Kan påverka prestandan på flerkärniga processorer något. Flerkärniga processorer kan ha olika fördröjning för att uppdatera navigeringsmesh. Förflyttning mellan externa världar och att gå in eller ut ur en plats producerar en uppdatering av navigeringsmesh. bifigurer kan inte hitta vägar innan navigeringsmesh har skapats runt om dem. Testa att inaktivera denna funktion om du vill ha en mer gammaldags AI som inte vet var den ska gå när du står bakom den där stenen och skjuter ett eldklot.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</translation>
     </message>
     <message>
         <source>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;If enabled NPCs apply evasion maneuver to avoid collisions with others.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</source>
-        <translation>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Om aktiverat kommer icke-spelbara figurer göra undanmanövrar för att undvika kollisioner med andra.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</translation>
+        <translation>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Om aktiverat kommer bifigurer göra undanmanövrar för att undvika kollisioner med andra.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</translation>
     </message>
     <message>
         <source>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Don&apos;t use race weight in NPC movement speed calculations.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</source>
@@ -763,7 +942,7 @@ Loggar och inställningar som ändras genom startaren och inne i spelet kommer s
     </message>
     <message>
         <source>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Makes NPCs and player movement more smooth. Recommended to use with &quot;turn to movement direction&quot; enabled.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</source>
-        <translation>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Gör spelarens och icke-spelbara figurers rörelser mjukare. Rekommenderas att användas tillsammans med &quot;vänd mot rörelseriktningen&quot; aktiverad.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</translation>
+        <translation>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Gör spelarens och bifigurers rörelser mjukare. Rekommenderas att användas tillsammans med &quot;vänd mot rörelseriktningen&quot; aktiverad.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</translation>
     </message>
     <message>
         <source>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Load per-group KF-files and skeleton files from Animations folder&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</source>
@@ -771,7 +950,7 @@ Loggar och inställningar som ändras genom startaren och inne i spelet kommer s
     </message>
     <message>
         <source>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Affects side and diagonal movement. Enabling this setting makes movement more realistic.&lt;/p&gt;&lt;p&gt;If disabled then the whole character&apos;s body is pointed to the direction of view. Diagonal movement has no special animation and causes sliding.&lt;/p&gt;&lt;p&gt;If enabled then the character turns lower body to the direction of movement. Upper body is turned partially. Head is always pointed to the direction of view. In combat mode it works only for diagonal movement. In non-combat mode it changes straight right and straight left movement as well. Also turns the whole body up or down when swimming according to the movement direction.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</source>
-        <translation>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Påverkar sido- och diagonalförflyttningar. Förflyttningar blir mer realistiska om aktiv.&lt;/p&gt;&lt;p&gt;Om aktiv kommer spelarrollfiguren vända underkroppen i rikting mot förflyttningen. Överkroppen vänds delvis. Huvudet pekar alltid dit kameran ser. I stidsläge fungerar det bara för diagonal förflyttning. Utanför strid ändrar inställningen förflyttningar rakt höger och vänster också. Inställningen vänder också hela kroppen upp eller ner vid simning enligt förflyttningsriktningen.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</translation>
+        <translation>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Påverkar sido- och diagonalförflyttningar. Förflyttningar blir mer realistiska om aktiv.&lt;/p&gt;&lt;p&gt;Om inaktiv kommer rollpersonen vända underkroppen i rikting mot förflyttningen. Överkroppen vänds delvis. Huvudet pekar alltid dit kameran ser. I stidsläge fungerar det bara för diagonal förflyttning. Utanför strid ändrar inställningen förflyttningar rakt höger och vänster också. Inställningen vänder också hela kroppen upp eller ner vid simning enligt förflyttningsriktningen.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</translation>
     </message>
     <message>
         <source>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Render holstered weapons (with quivers and scabbards), requires modded assets.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</source>
@@ -945,7 +1124,7 @@ Loggar och inställningar som ändras genom startaren och inne i spelet kommer s
     </message>
     <message>
         <source>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;If this setting is true, dialogue topics will have a different color if the topic is specific to the NPC you&apos;re talking to or the topic was previously seen. Color can be changed in settings.cfg.&lt;/p&gt;&lt;p&gt;The default value is false.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</source>
-        <translation>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Om denna inställning är på kommer dialogämnen ha en annan färg om ämnet är specifikt till den icke-spelbara figur du pratar med eller om ämnet redan har setts. Färger kan ändras i settings.cfg.&lt;/p&gt;&lt;p&gt;Förvalt är av.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</translation>
+        <translation>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Om denna inställning är på kommer dialogämnen ha en annan färg om ämnet är specifikt till bifiguren du pratar med eller om ämnet redan har setts. Färger kan ändras i settings.cfg.&lt;/p&gt;&lt;p&gt;Förvalt är av.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</translation>
     </message>
     <message>
         <source>Size of characters in game texts.</source>
@@ -1057,7 +1236,7 @@ Loggar och inställningar som ändras genom startaren och inne i spelet kommer s
     </message>
     <message>
         <source>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Enable shadows for NPCs and creatures besides the player character. May have a minor performance impact.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</source>
-        <translation>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Aktiverar skuggor för icke-spelbara figurer och varelser bortsett från spelarrollfiguren. Kan ha en liten negativ prestandapåverkan.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</translation>
+        <translation>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Aktiverar skuggor för bifigurer och varelser bortsett från spelarrollpersonen. Kan ha en liten negativ prestandapåverkan.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</translation>
     </message>
     <message>
         <source>512</source>
@@ -1081,7 +1260,7 @@ Loggar och inställningar som ändras genom startaren och inne i spelet kommer s
     </message>
     <message>
         <source>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Enable shadows exclusively for the player character. May have a very minor performance impact.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</source>
-        <translation>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Aktivera skuggor exklusivt för spelarrollfiguren. Kan ha en mycket liten negativ prestandapåverkan.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</translation>
+        <translation>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Aktivera skuggor exklusivt för spelarrollpersonen. Kan ha en mycket liten negativ prestandapåverkan.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</translation>
     </message>
     <message>
         <source>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;The resolution of each individual shadow map. Increasing it significantly improves shadow quality but may have a minor performance impact.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</source>
@@ -1141,7 +1320,7 @@ Loggar och inställningar som ändras genom startaren och inne i spelet kommer s
     </message>
     <message>
         <source>In third-person view, use the camera as the sound listener instead of the player character.</source>
-        <translation>Använd kameran som ljudlyssnare istället för spelarrollfiguren i tredjepersonsperspektivet.</translation>
+        <translation>Använd kameran som ljudlyssnare istället för spelarrollpersonen i tredjepersonsperspektivet.</translation>
     </message>
     <message>
         <source>Permanent Barter Disposition Changes</source>
@@ -1153,7 +1332,7 @@ Loggar och inställningar som ändras genom startaren och inne i spelet kommer s
     </message>
     <message>
         <source>NPCs Avoid Collisions</source>
-        <translation>Icke-spelbara figurer undviker kollisioner</translation>
+        <translation>bifigurer undviker kollisioner</translation>
     </message>
     <message>
         <source>Soulgem Values Rebalance</source>
@@ -1328,7 +1507,7 @@ Loggar och inställningar som ändras genom startaren och inne i spelet kommer s
     </message>
     <message>
         <source>Enable Actor Shadows</source>
-        <translation>Aktivera rollfigurskuggor</translation>
+        <translation>Aktivera rollpersonskuggor</translation>
     </message>
     <message>
         <source>Fade Start Multiplier</source>
@@ -1456,7 +1635,7 @@ Loggar och inställningar som ändras genom startaren och inne i spelet kommer s
     </message>
     <message>
         <source>Steal from Knocked out Actors in Combat</source>
-        <translation>Stjäl från avsvimmade rollfigurer i strid</translation>
+        <translation>Stjäl från avsvimmade figurer i strid</translation>
     </message>
     <message>
         <source>Factor Strength into Hand-to-Hand Combat</source>
@@ -1464,7 +1643,7 @@ Loggar och inställningar som ändras genom startaren och inne i spelet kommer s
     </message>
     <message>
         <source>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;This setting controls the behavior of factoring of Strength attribute into hand-to-hand damage: damage is multiplied by Strength value divided by 40.&lt;/p&gt;&lt;p&gt;Can apply to all actors or only to non-werewolf actors.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</source>
-        <translation>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Denna inställning styr om basegenskapen Strength (styrka) ska räknas in i skador från obeväpnade attacker: skadan multipliceras med värdet på Strength dividerat med 40.&lt;/p&gt;&lt;p&gt;Kan tillämpas på alla rollfigurer eller endast för rollfigurer som inte är varulvar.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</translation>
+        <translation>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Denna inställning styr om basegenskapen Strength (styrka) ska räknas in i skador från obeväpnade attacker: skadan multipliceras med värdet på Strength dividerat med 40.&lt;/p&gt;&lt;p&gt;Kan tillämpas på alla rollpersoner eller endast för rollpersoner som inte är varulvar.&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</translation>
     </message>
     <message>
         <source>Turn to Movement Direction</source>
@@ -1488,11 +1667,11 @@ Loggar och inställningar som ändras genom startaren och inne i spelet kommer s
     </message>
     <message>
         <source>Skip Menu and Generate Default Character</source>
-        <translation>Hoppa över meny och generera förinställd rollfigur</translation>
+        <translation>Hoppa över meny och generera förinställd rollperson</translation>
     </message>
     <message>
         <source>Start Default Character at</source>
-        <translation>Starta förinställd rollfigur vid</translation>
+        <translation>Starta förinställd rollperson vid</translation>
     </message>
     <message>
         <source>Run Script After Startup:</source>

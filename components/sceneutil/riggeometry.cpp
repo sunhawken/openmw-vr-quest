@@ -1,6 +1,15 @@
 #include "riggeometry.hpp"
 
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdint>
+#include <limits>
+#include <string_view>
+#include <unordered_map>
+
 #include <osg/MatrixTransform>
+#include <osg/TriangleIndexFunctor>
 
 #include <osgUtil/CullVisitor>
 
@@ -34,6 +43,8 @@ namespace SceneUtil
 
     void RigGeometry::setSourceGeometry(osg::ref_ptr<osg::Geometry> sourceGeometry)
     {
+        if (mSurfaceDecals && mSourceGeometry != sourceGeometry)
+            mSurfaceDecals->clear();
         for (unsigned int i = 0; i < 2; ++i)
             mGeometry[i] = nullptr;
 
@@ -101,6 +112,444 @@ namespace SceneUtil
         return mSourceGeometry;
     }
 
+    std::vector<std::string> RigGeometry::getInfluenceBoneNames() const
+    {
+        std::vector<std::string> names;
+        if (mData)
+        {
+            names.reserve(mData->mBones.size());
+            for (const BoneInfo& info : mData->mBones)
+                names.push_back(info.mName);
+        }
+        return names;
+    }
+
+    std::vector<RigGeometry::BoneInfo> RigGeometry::getBoneInfoList() const
+    {
+        if (mData)
+            return mData->mBones;
+        return {};
+    }
+
+    std::vector<RigGeometry::BoneWeights> RigGeometry::getPerVertexInfluences(std::size_t vertexCount) const
+    {
+        std::vector<BoneWeights> perVertex(vertexCount);
+        if (mData)
+        {
+            for (const auto& influence : mData->mInfluences)
+            {
+                for (unsigned short vertex : influence.second)
+                {
+                    if (vertex < vertexCount)
+                        perVertex[vertex] = influence.first;
+                }
+            }
+        }
+        return perVertex;
+    }
+
+    void RigGeometry::reinitialize()
+    {
+        mSkeleton = nullptr;
+        mNodes.clear();
+        mSkinToSkelMatrix = nullptr;
+        mLastFrameNumber = 0;
+        mBoundsFirstFrame = true;
+    }
+
+    void RigGeometry::applyJiggleSeamFeather(float distance)
+    {
+        if (distance <= 0.f || !mData || !mSourceGeometry)
+            return;
+
+        static const std::array<std::string_view, 4> jiggleBones
+            = { "bip01 l breast", "bip01 r breast", "bip01 l butt", "bip01 r butt" };
+
+        std::vector<bool> isJiggle(mData->mBones.size(), false);
+        bool anyJiggle = false;
+        for (std::size_t b = 0; b < mData->mBones.size(); ++b)
+        {
+            for (std::string_view name : jiggleBones)
+            {
+                if (mData->mBones[b].mName == name)
+                {
+                    isJiggle[b] = true;
+                    anyJiggle = true;
+                    break;
+                }
+            }
+        }
+        if (!anyJiggle)
+            return;
+
+        const osg::Vec3Array* verts = dynamic_cast<const osg::Vec3Array*>(mSourceGeometry->getVertexArray());
+        if (!verts || verts->empty())
+            return;
+        const std::size_t nv = verts->size();
+
+        // Open-edge (seam) boundary vertices: edges used by exactly one triangle.
+        struct EdgeCounter
+        {
+            std::unordered_map<std::uint64_t, int>* edges = nullptr;
+            void add(unsigned a, unsigned b)
+            {
+                if (a > b)
+                    std::swap(a, b);
+                (*edges)[(static_cast<std::uint64_t>(a) << 32) | b]++;
+            }
+            void operator()(unsigned i1, unsigned i2, unsigned i3)
+            {
+                add(i1, i2);
+                add(i2, i3);
+                add(i3, i1);
+            }
+        };
+        std::unordered_map<std::uint64_t, int> edges;
+        osg::TriangleIndexFunctor<EdgeCounter> collect;
+        collect.edges = &edges;
+        mSourceGeometry->accept(collect);
+
+        std::vector<osg::Vec3f> boundary;
+        for (const auto& [key, count] : edges)
+        {
+            if (count != 1)
+                continue;
+            const unsigned a = static_cast<unsigned>(key >> 32);
+            const unsigned b = static_cast<unsigned>(key & 0xffffffffu);
+            if (a < nv)
+                boundary.push_back((*verts)[a]);
+            if (b < nv)
+                boundary.push_back((*verts)[b]);
+        }
+        if (boundary.empty())
+            return;
+
+        // Expand the grouped influence data to per-vertex, feather jiggle weights, renormalize.
+        std::vector<BoneWeights> perVertex(nv);
+        for (const auto& influence : mData->mInfluences)
+            for (unsigned short v : influence.second)
+                if (v < nv)
+                    perVertex[v] = influence.first;
+
+        const float invDist = 1.f / distance;
+        for (std::size_t v = 0; v < nv; ++v)
+        {
+            float best = std::numeric_limits<float>::max();
+            const osg::Vec3f& p = (*verts)[v];
+            for (const osg::Vec3f& bp : boundary)
+            {
+                const float d2 = (p - bp).length2();
+                if (d2 < best)
+                    best = d2;
+            }
+            const float factor = std::min(1.f, std::sqrt(best) * invDist);
+            if (factor >= 0.999f)
+                continue;
+
+            BoneWeights& weights = perVertex[v];
+            float jiggleTotal = 0.f;
+            float nonJiggleTotal = 0.f;
+            for (auto& [bone, weight] : weights)
+            {
+                if (bone < isJiggle.size() && isJiggle[bone])
+                    weight *= factor;
+                if (bone < isJiggle.size() && isJiggle[bone])
+                    jiggleTotal += weight;
+                else
+                    nonJiggleTotal += weight;
+            }
+            const float remaining = std::max(0.f, 1.f - jiggleTotal);
+            if (nonJiggleTotal > 1e-6f)
+            {
+                const float s = remaining / nonJiggleTotal;
+                for (auto& [bone, weight] : weights)
+                    if (!(bone < isJiggle.size() && isJiggle[bone]))
+                        weight *= s;
+            }
+            else if (jiggleTotal > 1e-6f)
+            {
+                const float s = 1.f / jiggleTotal;
+                for (auto& [bone, weight] : weights)
+                    weight *= s;
+            }
+            weights.erase(std::remove_if(weights.begin(), weights.end(),
+                              [](const BoneWeight& bw) { return bw.second < 1e-5f; }),
+                weights.end());
+        }
+
+        setInfluences(perVertex);
+    }
+
+    SurfaceDecals* RigGeometry::getOrCreateSurfaceDecals()
+    {
+        if (!mSurfaceDecals)
+            mSurfaceDecals = new SurfaceDecals;
+        return mSurfaceDecals.get();
+    }
+
+    osg::ref_ptr<osg::Geometry> RigGeometry::snapshotWorldGeometry(const osg::NodePath& path,
+        const std::function<std::optional<osg::Matrixf>(std::string_view)>& boneWorld, bool positionsOnly,
+        bool dynamicArraysOnly, const std::optional<osg::Vec3d>& referenceOrigin)
+    {
+        if (!mData || !mSourceGeometry) return {};
+        auto skel = std::find_if(path.begin(), path.end(), [](osg::Node* n) {
+            return dynamic_cast<Skeleton*>(n) != nullptr;
+        });
+        if (skel == path.end()) return {};
+        // The same compensation as cull(), calculated locally so preparation cannot mutate rendering state.
+        auto skinRoot = path.end();
+        if (!mData->mRootBone.empty())
+            skinRoot = std::find_if(skel + 1, path.end(), [&](osg::Node* n) {
+                return Misc::StringUtils::ciEqual(n->getName(), mData->mRootBone);
+            });
+        if (skinRoot == path.end())
+        {
+            skinRoot = path.end() - 2;
+            if ((*skinRoot)->getName() != getName()) ++skinRoot;
+        }
+        else ++skinRoot;
+        osg::Matrix compensation;
+        for (auto it = skel + 1; it != skinRoot; ++it)
+            if (const auto* transform = (*it)->asTransform())
+                transform->computeWorldToLocalMatrix(compensation, nullptr);
+        osg::Matrixf skeletonInverse, drawableWorld;
+        if (referenceOrigin)
+        {
+            auto skeletonWorld = osg::computeLocalToWorld(osg::NodePath(path.begin(), skel + 1));
+            auto localDrawableWorld = osg::computeLocalToWorld(path);
+            skeletonWorld.setTrans(skeletonWorld.getTrans() - *referenceOrigin);
+            localDrawableWorld.setTrans(localDrawableWorld.getTrans() - *referenceOrigin);
+            skeletonInverse = osg::Matrixf::inverse(skeletonWorld);
+            drawableWorld = localDrawableWorld;
+        }
+        else
+        {
+            // Head and bisection snapshots evaluate the full skeleton path.
+            skeletonInverse = osg::Matrixf::inverse(
+                osg::computeLocalToWorld(osg::NodePath(path.begin(), skel + 1)));
+            drawableWorld = osg::computeLocalToWorld(path);
+        }
+        const osg::Matrixf suffix = osg::Matrixf(compensation) * mData->mTransform * drawableWorld;
+        std::vector<osg::Matrixf> matrices;
+        for (const auto& info : mData->mBones)
+        {
+            auto world = boneWorld(info.mName);
+            if (!world) return {};
+            matrices.push_back(info.mInvBindMatrix * *world * skeletonInverse);
+        }
+        osg::ref_ptr<osg::Geometry> out;
+        if (positionsOnly || dynamicArraysOnly)
+        {
+            const auto* source = dynamic_cast<const osg::Vec3Array*>(mSourceGeometry->getVertexArray());
+            if (!source) return {};
+            out = new osg::Geometry;
+            out->setVertexArray(new osg::Vec3Array(*source));
+            if (dynamicArraysOnly && !positionsOnly)
+            {
+                // Actor-owned transient skinning output. Do not clone materials,
+                // textures, topology, or cached model state on every frame.
+                if (const auto* normals = dynamic_cast<const osg::Vec3Array*>(mSourceGeometry->getNormalArray()))
+                    out->setNormalArray(new osg::Vec3Array(*normals), static_cast<osg::Array::Binding>(normals->getBinding()));
+                if (const auto* tangents = dynamic_cast<const osg::Vec4Array*>(mSourceGeometry->getTexCoordArray(7)))
+                    out->setTexCoordArray(7, new osg::Vec4Array(*tangents));
+            }
+        }
+        else
+            out = new osg::Geometry(*mSourceGeometry, osg::CopyOp::DEEP_COPY_ALL);
+        auto* positions = dynamic_cast<osg::Vec3Array*>(out->getVertexArray());
+        auto* normals = dynamic_cast<osg::Vec3Array*>(out->getNormalArray());
+        if (!positions) return {};
+        const auto* sourcePositions=static_cast<const osg::Vec3Array*>(mSourceGeometry->getVertexArray());
+        const auto* sourceNormals=dynamic_cast<const osg::Vec3Array*>(mSourceGeometry->getNormalArray());
+        const auto* sourceTangents=dynamic_cast<const osg::Vec4Array*>(mSourceGeometry->getTexCoordArray(7));
+        auto* tangents=dynamic_cast<osg::Vec4Array*>(out->getTexCoordArray(7));
+        // Match cull's unchanged bind-space fallback for vertices with no influences.
+        for(auto& p:*positions) p=p*drawableWorld;
+        if(normals)for(auto& n:*normals)n=osg::Matrixf::transform3x3(n,drawableWorld);
+        if(tangents)for(auto& t:*tangents)t=osg::Vec4f(osg::Matrixf::transform3x3(osg::Vec3f(t.x(),t.y(),t.z()),drawableWorld),t.w());
+        for (const auto& [influences, vertices] : mData->mInfluences)
+        {
+            osg::Matrixf matrix(0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,1);
+            for (const auto& [index, weight] : influences)
+                for (int i=0; i<16; ++i)
+                    if (i%4 != 3) matrix.ptr()[i] += matrices[index].ptr()[i] * weight;
+            matrix *= suffix;
+            for (auto vertex : vertices)
+            {
+                (*positions)[vertex] = (*sourcePositions)[vertex] * matrix;
+                if (normals && normals->size() == positions->size())
+                    (*normals)[vertex] = osg::Matrixf::transform3x3((*sourceNormals)[vertex], matrix);
+                if(tangents && tangents->size()==positions->size())
+                {
+                    const auto& t=(*sourceTangents)[vertex];
+                    (*tangents)[vertex]=osg::Vec4f(osg::Matrixf::transform3x3(osg::Vec3f(t.x(),t.y(),t.z()),matrix),t.w());
+                }
+            }
+        }
+        return out;
+    }
+
+    void RigGeometry::setBonePoseOverrides(BonePoseOverrides overrides)
+    {
+        mBonePoseOverrides=std::move(overrides);
+        mSkeleton=nullptr;mNodes.clear();mBoundsFirstFrame=true;mLastFrameNumber=~0u;
+    }
+
+    void RigGeometry::clearBonePoseOverrides()
+    {
+        if(mBonePoseOverrides.empty())return;
+        mBonePoseOverrides.clear();
+        mSkeleton=nullptr;mNodes.clear();mBoundsFirstFrame=true;mLastFrameNumber=~0u;
+    }
+
+    std::vector<std::string> RigGeometry::getInfluencingBoneNames() const
+    {
+        std::vector<std::string> result;
+        if(mData)for(const auto& bone:mData->mBones)result.push_back(bone.mName);
+        return result;
+    }
+
+    std::vector<unsigned short> RigGeometry::getVerticesInfluencedBy(std::string_view name) const
+    {
+        std::vector<unsigned short> result;
+        if(!mData)return result;
+        for(const auto& [influences,vertices]:mData->mInfluences)
+            for(const auto& [index,weight]:influences)
+                if(weight>0.f && Misc::StringUtils::ciEqual(mData->mBones[index].mName,name))
+                {result.insert(result.end(),vertices.begin(),vertices.end());break;}
+        return result;
+    }
+
+    std::optional<float> RigGeometry::getBoneLocalMaxX(std::string_view name) const
+    {
+        if (!mData || !mSourceGeometry)
+            return {};
+        const auto* vertices = dynamic_cast<const osg::Vec3Array*>(mSourceGeometry->getVertexArray());
+        if (!vertices)
+            return {};
+        std::optional<float> result;
+        for (const auto& [influences, indices] : mData->mInfluences)
+            for (const auto& [bone, weight] : influences)
+            {
+                const auto& info = mData->mBones[bone];
+                if (weight <= .5f || !Misc::StringUtils::ciEqual(info.mName, name))
+                    continue;
+                for (const auto index : indices)
+                    if (index < vertices->size())
+                    {
+                        const float x = ((*vertices)[index] * info.mInvBindMatrix).x();
+                        if (std::isfinite(x) && (!result || x > *result))
+                            result = x;
+                    }
+            }
+        return result;
+    }
+
+    void RigGeometry::slimAroundBones(const std::map<std::string, float, std::less<>>& factors)
+    {
+        if (!mData || !mSourceGeometry)
+            return;
+        const auto* source = dynamic_cast<const osg::Vec3Array*>(mSourceGeometry->getVertexArray());
+        if (!source)
+            return;
+        osg::ref_ptr<osg::Vec3Array> vertices = new osg::Vec3Array(*source, osg::CopyOp::DEEP_COPY_ALL);
+        bool changed = false;
+        for (const auto& [influences, list] : mData->mInfluences)
+        {
+            for (const unsigned short index : list)
+            {
+                if (index >= source->size())
+                    continue;
+                const osg::Vec3f original = (*source)[index];
+                osg::Vec3f offset;
+                // Weighted per bone, so a vertex shared with the torso moves only by the arm's share.
+                for (const auto& [bone, weight] : influences)
+                {
+                    const auto& info = mData->mBones[bone];
+                    const auto factor = std::find_if(factors.begin(), factors.end(),
+                        [&](const auto& item) { return Misc::StringUtils::ciEqual(item.first, info.mName); });
+                    if (factor == factors.end() || weight <= 0.f)
+                        continue;
+                    osg::Vec3f local = original * info.mInvBindMatrix;
+                    local.y() *= factor->second;
+                    local.z() *= factor->second;
+                    offset += (local * osg::Matrixf::inverse(info.mInvBindMatrix) - original) * weight;
+                }
+                if (offset.length2() > 0.f)
+                {
+                    (*vertices)[index] = original + offset;
+                    changed = true;
+                }
+            }
+        }
+        if (!changed)
+            return;
+        osg::ref_ptr<osg::Geometry> geometry = new osg::Geometry(*mSourceGeometry, osg::CopyOp::SHALLOW_COPY);
+        geometry->setVertexArray(vertices);
+        setSourceGeometry(geometry);
+    }
+
+    void RigGeometry::removeTrianglesOfBones(const std::vector<std::string>& bones)
+    {
+        if (!mData || !mSourceGeometry)
+            return;
+        const auto* source = mSourceGeometry->getVertexArray();
+        if (!source)
+            return;
+        // A vertex belongs to these bones when they hold most of its weight.
+        std::vector<char> owned(source->getNumElements(), 0);
+        for (const auto& [influences, list] : mData->mInfluences)
+        {
+            float share = 0.f;
+            for (const auto& [bone, weight] : influences)
+                for (const std::string& name : bones)
+                    if (Misc::StringUtils::ciEqual(mData->mBones[bone].mName, name))
+                        share += weight;
+            if (share > .5f)
+                for (const unsigned short index : list)
+                    if (index < owned.size())
+                        owned[index] = 1;
+        }
+        osg::ref_ptr<osg::Geometry> geometry = new osg::Geometry(*mSourceGeometry, osg::CopyOp::SHALLOW_COPY);
+        geometry->removePrimitiveSet(0, geometry->getNumPrimitiveSets());
+        bool changed = false;
+        for (unsigned int set = 0; set < mSourceGeometry->getNumPrimitiveSets(); ++set)
+        {
+            auto* primitives = mSourceGeometry->getPrimitiveSet(set);
+            auto* elements = primitives->getDrawElements();
+            if (!elements || primitives->getMode() != GL_TRIANGLES)
+            {
+                geometry->addPrimitiveSet(primitives);
+                continue;
+            }
+            osg::ref_ptr<osg::DrawElementsUInt> kept = new osg::DrawElementsUInt(GL_TRIANGLES);
+            for (unsigned int i = 0; i + 2 < elements->getNumIndices(); i += 3)
+            {
+                const unsigned int a = elements->index(i), b = elements->index(i + 1), d = elements->index(i + 2);
+                if (a < owned.size() && b < owned.size() && d < owned.size() && owned[a] && owned[b] && owned[d])
+                {
+                    changed = true;
+                    continue;
+                }
+                kept->push_back(a);
+                kept->push_back(b);
+                kept->push_back(d);
+            }
+            if (kept->size())
+                geometry->addPrimitiveSet(kept);
+        }
+        if (changed)
+            setSourceGeometry(geometry);
+    }
+
+    osg::Matrixf RigGeometry::getBoneMatrix(std::size_t index) const
+    {
+        auto found=mBonePoseOverrides.find(mData->mBones[index].mName);
+        if(found!=mBonePoseOverrides.end() && found->second.anchorNode)
+            return found->second.relative * found->second.anchorNode->mMatrixInSkeletonSpace;
+        return mNodes[index]->mMatrixInSkeletonSpace;
+    }
+
     bool RigGeometry::initFromParentSkeleton(osg::NodeVisitor* nv)
     {
         const osg::NodePath& path = nv->getNodePath();
@@ -136,6 +585,8 @@ namespace SceneUtil
                 Log(Debug::Error) << "Error: RigGeometry did not find bone " << info.mName;
         }
 
+        for(auto& [name,pose]:mBonePoseOverrides)
+            pose.anchorNode=mSkeleton->getBone(pose.anchor);
         return true;
     }
 
@@ -143,24 +594,39 @@ namespace SceneUtil
     {
         if (!mSkeleton)
         {
-            Log(Debug::Error)
-                << "Error: RigGeometry rendering with no skeleton, should have been initialized by UpdateVisitor";
-            // try to recover anyway, though rendering is likely to be incorrect.
+            // The UpdateVisitor normally links the skeleton before we cull. If it hasn't yet - e.g.
+            // the geometry was attached and culled in the same frame, or it's rendered in a
+            // character-preview scene - recover by finding the parent skeleton now. That recovery
+            // is common and harmless, so only a genuine failure to find a parent skeleton is worth
+            // an error; the recoverable case is logged at Debug to avoid spamming every frame.
             if (!initFromParentSkeleton(nv))
+            {
+                Log(Debug::Error) << "Error: RigGeometry rendering with no skeleton and no parent "
+                                     "skeleton could be found; skipping.";
                 return;
+            }
+            Log(Debug::Debug) << "RigGeometry culled before its skeleton was linked by the "
+                                 "UpdateVisitor; recovered from the parent skeleton.";
         }
 
         unsigned int traversalNumber = nv->getTraversalNumber();
-        if (mLastFrameNumber == traversalNumber || (mLastFrameNumber != 0 && !mSkeleton->getActive()))
+        // Reuse the last result when already skinned this frame, or when the bones have not moved since: the
+        // skeleton is inactive, or its update was skipped this frame (off screen or distant animation LOD).
+        if (mLastFrameNumber == traversalNumber
+            || (mLastFrameNumber != 0 && (!mSkeleton->getActive() || mSkeleton->isPoseFrozen(traversalNumber))))
         {
-            osg::Geometry& geom = *getGeometry(mLastFrameNumber);
+            osg::Geometry& geom = *mGeometry[mCurrentBuffer];
             nv->pushOntoNodePath(&geom);
             nv->apply(geom);
             nv->popFromNodePath();
+            if (mSurfaceDecals)
+                mSurfaceDecals->cull(geom, *static_cast<osgUtil::CullVisitor*>(nv));
             return;
         }
+        if (mLastFrameNumber != 0)
+            mCurrentBuffer ^= 1u;
         mLastFrameNumber = traversalNumber;
-        osg::Geometry& geom = *getGeometry(mLastFrameNumber);
+        osg::Geometry& geom = *mGeometry[mCurrentBuffer];
 
         mSkeleton->updateBoneMatrices(traversalNumber);
 
@@ -179,13 +645,39 @@ namespace SceneUtil
         osg::Vec3Array* normalDst = static_cast<osg::Vec3Array*>(geom.getNormalArray());
         osg::Vec4Array* tangentDst = static_cast<osg::Vec4Array*>(geom.getTexCoordArray(7));
 
+        // Shadowglass v8 opt-in animation-pivot compensation. ONLY marker-tagged meshes.
+        // Each offset is based on artist-supplied joint targets, in bind-pose TES3 units.
+        // The standard skinning path is preserved for every other mesh.
+        const bool shadowglassJointRetarget = getName().find("SGRETARGETV8") != std::string::npos;
+        const auto shadowglassPivotOffset = [](const std::string& name) -> osg::Vec3f
+        {
+            if (name == "Bip01 L Thigh" || name == "Bip01 R Thigh")
+                return osg::Vec3f(0.4522f, -0.5829f, 8.2710f);
+            if (name == "Bip01 L Calf" || name == "Bip01 L Foot" || name == "Bip01 L Toe0")
+                return osg::Vec3f(2.2732f, 1.6904f, 12.2443f);
+            if (name == "Bip01 R Calf" || name == "Bip01 R Foot" || name == "Bip01 R Toe0")
+                return osg::Vec3f(-2.4751f, 1.5880f, 12.0401f);
+            return osg::Vec3f(0.f, 0.f, 0.f);
+        };
         std::vector<osg::Matrixf> boneMatrices(mNodes.size());
         std::vector<Bone*>::const_iterator bone = mNodes.begin();
         std::vector<BoneInfo>::const_iterator boneInfo = mData->mBones.begin();
         for (osg::Matrixf& boneMat : boneMatrices)
         {
             if (*bone != nullptr)
-                boneMat = boneInfo->mInvBindMatrix * (*bone)->mMatrixInSkeletonSpace;
+            {
+                boneMat = boneInfo->mInvBindMatrix * getBoneMatrix(std::distance(mNodes.cbegin(), bone));
+                if (shadowglassJointRetarget)
+                {
+                    const osg::Vec3f offset = shadowglassPivotOffset(boneInfo->mName);
+                    if (offset.length2() > 0.f)
+                    {
+                        // OSG uses row-vector preMult matrices. Conjugation shifts the
+                        // effective bend center while leaving the T-pose unchanged.
+                        boneMat = osg::Matrixf::translate(-offset) * boneMat * osg::Matrixf::translate(offset);
+                    }
+                }
+            }
             ++bone;
             ++boneInfo;
         }
@@ -202,7 +694,9 @@ namespace SceneUtil
 
             for (const auto& [index, weight] : influences)
             {
-                if (mNodes[index] == nullptr)
+                // Malformed NiSkinData can reference a bone index past our bone list; skip it
+                // rather than read out of bounds (mNodes/boneMatrices are sized to mData->mBones).
+                if (index >= mNodes.size() || mNodes[index] == nullptr)
                     continue;
                 const float* boneMatPtr = boneMatrices[index].ptr();
                 float* resultMatPtr = resultMat.ptr();
@@ -215,6 +709,11 @@ namespace SceneUtil
 
             for (unsigned short vertex : vertices)
             {
+                // Skip skin vertex indices that fall outside the geometry (malformed NiSkinData
+                // authored for a different vertex count). Writing past the destination vertex array
+                // corrupts the heap and crashes later in an unrelated allocation.
+                if (vertex >= positionDst->size())
+                    continue;
                 (*positionDst)[vertex] = resultMat.preMult((*positionSrc)[vertex]);
                 if (normalDst)
                     (*normalDst)[vertex] = osg::Matrixf::transform3x3((*normalSrc)[vertex], resultMat);
@@ -240,6 +739,8 @@ namespace SceneUtil
         nv->pushOntoNodePath(&geom);
         nv->apply(geom);
         nv->popFromNodePath();
+        if (mSurfaceDecals)
+            mSurfaceDecals->cull(geom, *static_cast<osgUtil::CullVisitor*>(nv));
     }
 
     void RigGeometry::updateBounds(osg::NodeVisitor* nv)
@@ -273,7 +774,7 @@ namespace SceneUtil
                 continue;
 
             osg::BoundingSpheref bs = info.mBoundSphere;
-            transformBoundingSphere(bone->mMatrixInSkeletonSpace * transform, bs);
+            transformBoundingSphere(getBoneMatrix(index-1) * transform, bs);
             box.expandBy(bs);
         }
 
@@ -331,6 +832,12 @@ namespace SceneUtil
                 trans->computeWorldToLocalMatrix(*mSkinToSkelMatrix, nullptr);
             }
         }
+    }
+
+    void RigGeometry::makeInfluenceDataUnique()
+    {
+        if (mData && mData->referenceCount() > 1)
+            mData = new InfluenceData(*mData);
     }
 
     void RigGeometry::setBoneInfo(std::vector<BoneInfo>&& bones)
@@ -399,12 +906,6 @@ namespace SceneUtil
 
     void RigGeometry::accept(osg::PrimitiveFunctor& func) const
     {
-        getGeometry(mLastFrameNumber)->accept(func);
+        mGeometry[mCurrentBuffer]->accept(func);
     }
-
-    osg::Geometry* RigGeometry::getGeometry(unsigned int frame) const
-    {
-        return mGeometry[frame % 2].get();
-    }
-
 }

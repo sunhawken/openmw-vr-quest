@@ -3,15 +3,21 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
 #include <optional>
 #include <span>
 #include <unordered_map>
+#include <unordered_set>
 #include <variant>
 
+#include <Jolt/Jolt.h>
+#include <Jolt/Physics/Body/BodyID.h>
+
 #include <osg/BoundingBox>
+#include <osg/Matrixf>
 #include <osg/Quat>
 #include <osg/Timer>
 #include <osg/ref_ptr>
@@ -20,8 +26,18 @@
 
 #include "../mwworld/ptr.hpp"
 
+#include "joltlisteners.hpp"
 #include "collisiontype.hpp"
 #include "raycasting.hpp"
+
+namespace JPH
+{
+    class JobSystem;
+    class TempAllocatorImpl;
+    class PhysicsSystem;
+    class BodyInterface;
+    class BodyLockInterfaceLocking;
+}
 
 namespace osg
 {
@@ -32,28 +48,30 @@ namespace osg
 
 namespace MWRender
 {
-    class DebugDrawer;
+    class JoltDebugDrawer;
 }
 
 namespace Resource
 {
-    class BulletShapeManager;
+    class PhysicsShapeManager;
     class ResourceSystem;
 }
 
-class btCollisionWorld;
-class btBroadphaseInterface;
-class btDefaultCollisionConfiguration;
-class btCollisionDispatcher;
-class btCollisionObject;
-class btCollisionShape;
-class btVector3;
+namespace SceneUtil
+{
+    class Skeleton;
+}
 
 namespace MWPhysics
 {
+    class CollisionShapeConfig;
+    class MWWater;
     class HeightField;
     class Object;
+    class DynamicObject;
     class Actor;
+    class RagdollWrapper;
+    class Ragdoll;
     class PhysicsTaskScheduler;
     class Projectile;
     enum ScriptedCollisionType : char;
@@ -83,19 +101,34 @@ namespace MWPhysics
         ActorFrameData(Actor& actor, bool inert, bool waterCollision, float slowFall, float waterlevel, bool isPlayer);
         osg::Vec3f mPosition;
         osg::Vec3f mInertia;
-        const btCollisionObject* mStandingOn;
+        osg::Vec3f mExternalVelocity;
+        osg::Vec3f mLocomotionVelocity;
+        osg::Vec3f mSimulationVelocity;
+        const bool mKineticMovement;
+        const bool mBrutalSliding;
+        const bool mBrutalSlideLow;
+        const float mBrutalSlideFrictionBlend; // Active glide, then the phase-3 exit only.
+        bool mBrutalSlideDownhill = false;
+        osg::Vec3f mBrutalSlideGroundNormal;
+        osg::Vec3f mBrutalSlideGroundPoint;
+        float mSlideActorContactTime = 0.f;
+        float mExternalImpactSpeed = 0.f;
+        osg::Vec3f mExternalImpactPosition;
+        osg::Vec3f mExternalImpactNormal;
+        JPH::BodyID mExternalImpactObject;
         bool mIsOnGround;
         bool mIsOnSlope;
         bool mWalkingOnWater;
         const bool mInert;
-        btCollisionObject* mCollisionObject;
+        JPH::BodyID mStandingOn;
+        JPH::BodyID mPhysicsBody;
         const float mSwimLevel;
         const float mSlowFall;
         osg::Vec2f mRotation;
         osg::Vec3f mMovement;
         osg::Vec3f mLastStuckPosition;
         const float mWaterlevel;
-        const float mHalfExtentsZ;
+        float mHalfExtentsZ;
         float mOldHeight;
         unsigned int mStuckFrames;
         const bool mFlying;
@@ -104,16 +137,7 @@ namespace MWPhysics
         const bool mWaterCollision;
         const bool mSkipCollisionDetection;
         const bool mIsPlayer;
-    };
-
-    struct ProjectileFrameData
-    {
-        explicit ProjectileFrameData(Projectile& projectile);
-        osg::Vec3f mPosition;
-        osg::Vec3f mMovement;
-        const btCollisionObject* mCaster;
-        const btCollisionObject* mCollisionObject;
-        Projectile* mProjectile;
+        JPH::ObjectLayer mCollisionMask;
     };
 
     struct WorldFrameData
@@ -146,8 +170,7 @@ namespace MWPhysics
     };
 
     using ActorSimulation = SimulationImpl<Actor, ActorFrameData>;
-    using ProjectileSimulation = SimulationImpl<Projectile, ProjectileFrameData>;
-    using Simulation = std::variant<ActorSimulation, ProjectileSimulation>;
+    using Simulation = std::variant<ActorSimulation>;
 
     class PhysicsSystem : public RayCastingInterface
     {
@@ -155,14 +178,15 @@ namespace MWPhysics
         PhysicsSystem(Resource::ResourceSystem* resourceSystem, osg::ref_ptr<osg::Group> parentNode);
         virtual ~PhysicsSystem();
 
-        Resource::BulletShapeManager* getShapeManager();
+        Resource::PhysicsShapeManager* getShapeManager();
 
         void enableWater(float height);
         void setWaterHeight(float height);
         void disableWater();
 
         void addObject(const MWWorld::Ptr& ptr, VFS::Path::NormalizedView mesh, osg::Quat rotation,
-            int collisionType = CollisionType_World);
+            int collisionType = Layers::WORLD);
+        void addDynamicObject(const MWWorld::Ptr& ptr, VFS::Path::NormalizedView mesh, osg::Quat rotation, float mass);
         void addActor(const MWWorld::Ptr& ptr, VFS::Path::NormalizedView mesh);
 
         int addProjectile(
@@ -177,9 +201,12 @@ namespace MWPhysics
 
         const Object* getObject(const MWWorld::ConstPtr& ptr) const;
 
+        DynamicObject* getDynamicObject(const MWWorld::Ptr& ptr);
+        const DynamicObject* getDynamicObject(const MWWorld::ConstPtr& ptr) const;
+
         Projectile* getProjectile(int projectileId) const;
 
-        // Object or Actor
+        // Object, DynamicObject, or Actor
         void remove(const MWWorld::Ptr& ptr);
 
         void updateScale(const MWWorld::Ptr& ptr);
@@ -201,6 +228,44 @@ namespace MWPhysics
 
         /// Apply new positions to actors
         void moveActors();
+        /// Apply new positions to dynamic objects (from Jolt simulation)
+        void moveDynamicObjects();
+        void applyObjectImpulse(const MWWorld::Ptr& ptr, const osg::Vec3f& impulse, float mass);
+        void addReleasedEquipment(const MWWorld::Ptr& ptr);
+        void initializeReleasedEquipment(const MWWorld::Ptr& item, const MWWorld::Ptr& actor,
+            const osg::Vec3f& linear, const osg::Vec3f& angular);
+        bool getRagdollEquipmentFrame(const MWWorld::Ptr& actor, bool left,
+            osg::Matrixf& frame, osg::Vec3f& linear, osg::Vec3f& angular) const;
+        std::vector<osg::Vec3f> getReleasedEquipmentState(const MWWorld::Ptr& item) const;
+        void createNpcRagdoll(const MWWorld::Ptr& ptr,
+            const std::map<std::string, osg::Matrixf, std::less<>>& bones, const osg::Vec3f& kick);
+        void stopNpcRagdoll(const MWWorld::Ptr& ptr);
+        bool detachNpcRagdollHead(const MWWorld::Ptr& ptr, const osg::Vec3f& cutVelocity,
+            const osg::Vec3f& headAngularImpulse);
+        bool detachNpcRagdollTorso(const MWWorld::Ptr& ptr, const osg::Vec3f& cutVelocity,
+            const osg::Vec3f& upperSeparation, const std::string& savedPose = {});
+        std::string getNpcBisectionPoseData(const MWWorld::Ptr& ptr) const;
+        bool detachNpcRagdollLimbs(const MWWorld::Ptr& ptr, unsigned mask,
+            const osg::Vec3f& cutVelocity, const std::string& savedPose = {});
+        std::string getNpcLimbSeveringPoseData(const MWWorld::Ptr& ptr) const;
+        unsigned getNpcSeveredLimbsMask(const MWWorld::Ptr& ptr) const;
+        void moveNpcRagdolls(float duration);
+        // Called after OSG has evaluated this frame's animation controllers.
+        void sampleNpcRagdollAnimation(float duration);
+        bool applyNpcKick(const MWWorld::Ptr& ptr, const osg::Vec3f& kick, const MWWorld::Ptr& attacker, bool continuing = false,
+            bool knockDown = false, bool slideTrip = false);
+        bool applyNpcSuperKick(const MWWorld::Ptr& ptr, const osg::Vec3f& velocity,
+            const MWWorld::Ptr& attacker, std::uint64_t kickId);
+        std::map<std::string, double> getNpcSuperKickState(const MWWorld::Ptr& ptr) const;
+        std::vector<osg::Vec3f> getNpcRagdollDynamics(const MWWorld::Ptr& ptr) const;
+        std::vector<osg::Vec3f> getNpcRagdollState(const MWWorld::Ptr& ptr) const;
+        std::map<std::string, double> getNpcRagdollEnhancementState(const MWWorld::Ptr& ptr) const;
+        bool applyNpcRagdollImpact(const MWWorld::Ptr& ptr, std::size_t part, const osg::Vec3f& point,
+            const osg::Vec3f& impulse, std::uint64_t id);
+        // Kicks the nearest reachable ragdoll part (body or severed head). Returns the corpse,
+        // or an empty Ptr; headHit reports a severed head.
+        MWWorld::Ptr kickNpcRagdoll(const osg::Vec3f& origin, const osg::Vec3f& forward, float reach,
+            float minimumDot, const osg::Vec3f& velocity, bool& headHit, osg::Vec3f& hitPoint, std::size_t& hitPart);
         void debugDraw();
 
         std::vector<MWWorld::Ptr> getCollisions(const MWWorld::ConstPtr& ptr, int collisionGroup,
@@ -208,6 +273,14 @@ namespace MWPhysics
         std::vector<ContactPoint> getCollisionsPoints(
             const MWWorld::ConstPtr& ptr, int collisionGroup, int collisionMask) const;
         osg::Vec3f traceDown(const MWWorld::Ptr& ptr, const osg::Vec3f& position, float maxHeight);
+        void optimize();
+
+        // Batch operations for efficient bulk body management during cell loading/unloading
+        void beginBatchAdd();
+        void endBatchAdd();
+        void queueBodyRemoval(const MWWorld::Ptr& ptr);
+        void queueHeightFieldRemoval(int x, int y);
+        void flushBodyRemovals();
 
         // ## VR_PATCH BEGIN
         // VR still needs getHitContact for realistic combat
@@ -219,11 +292,11 @@ namespace MWPhysics
         /// ignoring all other actors.
         RayCastingResult castRay(const osg::Vec3f& from, const osg::Vec3f& to,
             const std::vector<MWWorld::ConstPtr>& ignore = {}, const std::vector<MWWorld::Ptr>& targets = {},
-            int mask = CollisionType_Default, int group = 0xff) const override;
+            int mask = CollisionMask_Default, int group = 0xff) const override;
         using RayCastingInterface::castRay;
 
         RayCastingResult castSphere(const osg::Vec3f& from, const osg::Vec3f& to, float radius,
-            int mask = CollisionType_Default, int group = 0xff) const override;
+            int mask = CollisionMask_Default, int group = 0xff) const override;
 
         /// Return true if actor1 can see actor2.
         bool getLineOfSight(const MWWorld::ConstPtr& actor1, const MWWorld::ConstPtr& actor2) const override;
@@ -255,7 +328,12 @@ namespace MWPhysics
         void queueObjectMovement(const MWWorld::Ptr& ptr, const osg::Vec3f& velocity);
 
         /// Clear the queued movements list without applying.
+        /// Also clears all simulation buffers and standing-on references.
         void clearQueuedMovement();
+
+        /// Synchronize any pending physics simulation results.
+        /// Call this before removing objects to ensure stale body IDs are not used.
+        void syncSimulation();
 
         /// Return true if \a actor has been standing on \a object in this frame
         /// This will trigger whenever the object is directly below the actor.
@@ -273,13 +351,13 @@ namespace MWPhysics
 
         bool toggleDebugRendering();
 
+        void reportCollision(const osg::Vec3f& position, const osg::Vec3f& normal);
+
         /// Mark the given object as a 'non-solid' object. A non-solid object means that
         /// \a isOnSolidGround will return false for actors standing on that object.
         void markAsNonSolid(const MWWorld::ConstPtr& ptr);
 
         bool isOnSolidGround(const MWWorld::Ptr& actor) const;
-
-        void updateAnimatedCollisionShape(const MWWorld::Ptr& object);
 
         template <class Function>
         void forEachAnimatedObject(Function&& function) const
@@ -291,26 +369,128 @@ namespace MWPhysics
             const MWWorld::LiveCellRefBase* actor, const osg::Vec3f& position, float radius) const;
 
         void reportStats(unsigned int frameNumber, osg::Stats& stats) const;
-        void reportCollision(const btVector3& position, const btVector3& normal);
+
+        inline const JPH::BodyLockInterfaceLocking& getBodyLockInterface() const;
+
+        const JPH::BodyInterface& getBodyInterface() const;
 
         float mPhysicsDt;
 
+        // Grab/hold functionality for dynamic objects (Oblivion/Skyrim style)
+        // Returns true if successfully started grabbing an object
+        bool grabObject(const osg::Vec3f& rayStart, const osg::Vec3f& rayDir, float maxDistance);
+        // Release the currently held object (with optional throw velocity)
+        void releaseGrabbedObject(const osg::Vec3f& throwVelocity = osg::Vec3f());
+        // Update the held object's target position (call every frame while holding)
+        void updateGrabbedObject(const osg::Vec3f& targetPosition);
+        // Check if we're currently holding an object
+        bool isGrabbingObject() const { return mGrabbedObject != nullptr || mGrabbedRagdoll != nullptr; }
+        // Get the currently grabbed object
+        MWWorld::Ptr getGrabbedObject() const;
+        // Get grab distance from camera
+        float getGrabDistance() const { return mGrabDistance; }
+
+        // Ragdoll grabbing - grab a specific body part of a ragdoll
+        // Returns true if successfully started grabbing a ragdoll body
+        bool grabRagdoll(const osg::Vec3f& rayStart, const osg::Vec3f& rayDir, float maxDistance);
+        // Release the currently grabbed ragdoll body
+        void releaseGrabbedRagdoll(const osg::Vec3f& throwVelocity = osg::Vec3f());
+        // Update the grabbed ragdoll body's target position
+        void updateGrabbedRagdoll(const osg::Vec3f& targetPosition);
+        // Check if we're currently grabbing a ragdoll
+        bool isGrabbingRagdoll() const { return mGrabbedRagdoll != nullptr; }
+        // Get the ptr of the grabbed ragdoll's actor
+        MWWorld::Ptr getGrabbedRagdollPtr() const;
+
+        // Apply melee hit impulse to dynamic objects in a cone
+        // Used when weapons swing to push nearby objects
+        void applyMeleeHitToDynamicObjects(const osg::Vec3f& origin, const osg::Vec3f& direction,
+            float reach, float attackStrength);
+
+        // Push dynamic objects that actors are colliding with
+        // Called each frame to make actors push items when walking into them
+        void pushDynamicObjectsFromActors();
+
+        // Ragdoll physics for dead actors
+        // Activates ragdoll physics for a dead actor, replacing their kinematic body
+        // @param ptr The dead actor
+        // @param skeleton The actor's skeleton for bone mapping
+        // @param hitImpulse Optional impulse from the killing blow
+        void activateRagdoll(const MWWorld::Ptr& ptr, SceneUtil::Skeleton* skeleton,
+            const osg::Vec3f& hitImpulse = osg::Vec3f());
+
+        // Remove a ragdoll when the actor is removed from the world
+        void removeRagdoll(const MWWorld::Ptr& ptr);
+
+        // Get the ragdoll for an actor (nullptr if not ragdolled)
+        RagdollWrapper* getRagdoll(const MWWorld::Ptr& ptr);
+        const RagdollWrapper* getRagdoll(const MWWorld::ConstPtr& ptr) const;
+
+        // Update all ragdoll bone transforms (call after physics step)
+        void updateRagdolls();
+
+        // Check if an actor has an active ragdoll
+        bool hasRagdoll(const MWWorld::ConstPtr& ptr) const;
+
+        // Access to Jolt physics system for constraint management
+        JPH::PhysicsSystem* getJoltSystem() { return mPhysicsSystem.get(); }
+
     private:
         void updateWater();
+        void updateDynamicObjectWaterZones();
+        void updatePtrHolders();
+
+        bool applyNpcKickImpl(const MWWorld::Ptr& ptr, const osg::Vec3f& kick, const MWWorld::Ptr& attacker,
+            bool continuing, bool knockDown, bool superKick, bool slideTrip = false);
+        void processSuperKickContacts();
 
         void prepareSimulation(bool willSimulate, std::vector<Simulation>& simulations);
 
-        std::unique_ptr<btBroadphaseInterface> mBroadphase;
-        std::unique_ptr<btDefaultCollisionConfiguration> mCollisionConfiguration;
-        std::unique_ptr<btCollisionDispatcher> mDispatcher;
-        std::unique_ptr<btCollisionWorld> mCollisionWorld;
-        std::unique_ptr<PhysicsTaskScheduler> mTaskScheduler;
+        // NOTE: These are unique_ptr to ensure they are created AFTER Jolt is initialized
+        // (after RegisterDefaultAllocator, Factory creation, and RegisterTypes are called)
+        std::unique_ptr<JoltContactListener> mContactListener;
+        std::unique_ptr<JoltBPLayerInterface> mBPLayerInterface;
+        std::unique_ptr<JoltObjectVsBroadPhaseLayerFilter> mObjectVsBPLayerFilter;
+        std::unique_ptr<JoltObjectLayerPairFilter> mObjectVsObjectLayerFilter;
 
-        std::unique_ptr<Resource::BulletShapeManager> mShapeManager;
+        std::unique_ptr<JPH::PhysicsSystem> mPhysicsSystem;
+        std::unique_ptr<PhysicsTaskScheduler> mTaskScheduler;
+        std::unique_ptr<JPH::TempAllocatorImpl> mMemoryAllocator;
+        std::unique_ptr<JPH::JobSystem> mPhysicsJobSystem;
+        std::unique_ptr<Resource::PhysicsShapeManager> mShapeManager;
+        std::unique_ptr<CollisionShapeConfig> mCollisionShapeConfig;
         Resource::ResourceSystem* mResourceSystem;
 
         using ObjectMap = std::unordered_map<const MWWorld::LiveCellRefBase*, std::shared_ptr<Object>>;
+        struct PushRagdoll { float age=0.f, settled=0.f, peakZ=0.f, previousZ=0.f, downSpeed=0.f, unsupported=0.f;
+            bool landed=false, supported=false, knockDown=false; MWWorld::Ptr attacker; };
+        std::unordered_map<const MWWorld::LiveCellRefBase*, PushRagdoll> mPushRagdolls;
+        struct SuperKickSource
+        {
+            MWWorld::Ptr attacker;
+            std::uint64_t kickId = 0;
+            unsigned knockdowns = 0, rejectedContacts = 0;
+        };
+        std::unordered_map<const MWWorld::LiveCellRefBase*, SuperKickSource> mSuperKickSources;
+        std::unordered_map<const MWWorld::LiveCellRefBase*, std::uint64_t> mSuperKickVictims;
+        // Accepted nonces remain consumed when a source recovers or is removed;
+        // replaying the queued action must never create another powered launch.
+        std::unordered_set<std::uint64_t> mSuperKickIds;
+        struct KickWatch { MWWorld::Ptr actor, attacker; osg::Vec3f direction; float age=0.f; float lift=0.f; };
+        std::unordered_map<const MWWorld::LiveCellRefBase*, KickWatch> mKickWatches;
         ObjectMap mObjects;
+        std::unordered_map<const MWWorld::LiveCellRefBase*, std::unique_ptr<Ragdoll>> mBrutalRagdolls;
+        struct RagdollAnimationSample
+        {
+            std::map<std::string, osg::Matrixf, std::less<>> bones;
+            std::map<std::string, std::pair<osg::Vec3f, osg::Vec3f>, std::less<>> motion;
+            osg::Vec3f renderedRootPosition;
+            float deadAge = 0.f;
+        };
+        std::unordered_map<const MWWorld::LiveCellRefBase*, RagdollAnimationSample> mRagdollAnimation;
+
+        using DynamicObjectMap = std::unordered_map<const MWWorld::LiveCellRefBase*, std::shared_ptr<DynamicObject>>;
+        DynamicObjectMap mDynamicObjects;
 
         std::map<Object*, bool> mAnimatedObjects; // stores pointers to elements in mObjects
 
@@ -328,13 +508,13 @@ namespace MWPhysics
 
         unsigned int mProjectileId;
 
+        float mTimeAccumJolt = 0.0f;
         float mWaterHeight;
         bool mWaterEnabled;
 
-        std::unique_ptr<btCollisionObject> mWaterCollisionObject;
-        std::unique_ptr<btCollisionShape> mWaterCollisionShape;
+        std::unique_ptr<MWWater> mWaterInstance;
 
-        std::unique_ptr<MWRender::DebugDrawer> mDebugDrawer;
+        std::unique_ptr<MWRender::JoltDebugDrawer> mJoltDebugDrawer;
 
         osg::ref_ptr<osg::Group> mParentNode;
 
@@ -344,6 +524,27 @@ namespace MWPhysics
 
         PhysicsSystem(const PhysicsSystem&);
         PhysicsSystem& operator=(const PhysicsSystem&);
+
+        // Grab/hold state for dynamic objects
+        DynamicObject* mGrabbedObject = nullptr;
+        float mGrabDistance = 150.0f;  // Distance from camera to hold object
+        osg::Vec3f mGrabTargetPosition;
+
+        // Grab/hold state for ragdolls
+        RagdollWrapper* mGrabbedRagdoll = nullptr;
+        int mGrabbedRagdollBodyIndex = -1;  // Which body part is being grabbed
+
+        // Batch removal queues
+        std::vector<const MWWorld::LiveCellRefBase*> mPendingObjectRemovals;
+        std::vector<const MWWorld::LiveCellRefBase*> mPendingDynamicRemovals;
+        std::vector<const MWWorld::LiveCellRefBase*> mPendingActorRemovals;
+        std::vector<const MWWorld::LiveCellRefBase*> mPendingRagdollRemovals;
+        std::vector<std::pair<int, int>> mPendingHeightFieldRemovals;
+
+        // Ragdoll storage for dead actors
+        using RagdollMap = std::unordered_map<const MWWorld::LiveCellRefBase*, std::shared_ptr<RagdollWrapper>>;
+        RagdollMap mRagdolls;
+        static constexpr int sMaxActiveRagdolls = 20;  // Performance limit
     };
 }
 

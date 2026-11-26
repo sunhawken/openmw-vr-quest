@@ -90,6 +90,8 @@ venv/
 ## operating system files
 .DS_Store
 Thumbs.db
+/build-linux/
+/dist/
 
 # Quest/Android port — downloaded toolchain + generated/packaged build artifacts.
 # The upstream "build*/" rule above also matches the buildscripts/ DIRECTORY name, which

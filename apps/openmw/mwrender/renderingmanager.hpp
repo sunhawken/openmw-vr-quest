@@ -1,5 +1,6 @@
 #ifndef OPENMW_MWRENDER_RENDERINGMANAGER_H
 #define OPENMW_MWRENDER_RENDERINGMANAGER_H
+#include <map>
 
 #include "objects.hpp"
 #include "renderinginterface.hpp"
@@ -51,6 +52,12 @@ namespace ESM
 namespace Terrain
 {
     class World;
+    class TerrainOccluder;
+}
+
+namespace OcclusionCulling
+{
+    class OcclusionStorage;
 }
 
 namespace Fallback
@@ -60,6 +67,7 @@ namespace Fallback
 
 namespace SceneUtil
 {
+    class OcclusionCuller;
     class ShadowManager;
     class WorkQueue;
     class LightManager;
@@ -101,6 +109,7 @@ namespace MWRender
     class Water;
     class TerrainStorage;
     class LandManager;
+    class SceneOcclusionCallback;
     class NavMesh;
     class ActorsPaths;
     class RecastMesh;
@@ -123,6 +132,7 @@ namespace MWRender
         /// Cast a ray between two points
         ESM::RefNum mHitRefnum;
         float mRatio;
+        int mHitPart = -1;
     };
 //## VR_PATCH END
 
@@ -174,6 +184,9 @@ namespace MWRender
         void addCell(const MWWorld::CellStore* store);
         void removeCell(const MWWorld::CellStore* store);
 
+        // Set the path to the occluder mesh cache DB. Must be called before any cells load.
+        void setOcclusionCachePath(const std::string& path);
+
         void enableTerrain(bool enable, ESM::RefId worldspace);
 
         void updatePtr(const MWWorld::Ptr& old, const MWWorld::Ptr& updated);
@@ -191,8 +204,14 @@ namespace MWRender
         void screenshot(osg::Image* image, int w, int h);
 
 //## VR_PATCH BEGIN
+        using RayResult = MWRender::RayResult;
         RayResult castRay(const osg::Vec3f& origin, const osg::Vec3f& dest, bool ignorePlayer,
-            bool ignoreActors = false, uint32_t ignoreMask = MWRender::Mask_3DGUI, std::span<const MWWorld::Ptr> ignoreList = {});
+            bool ignoreActors = false, uint32_t ignoreMask = MWRender::Mask_3DGUI,
+            std::span<const MWWorld::Ptr> ignoreList = {}, bool melee = false);
+
+        std::vector<float> findSegmentCandidates(
+            std::span<const std::pair<osg::Vec3f, osg::Vec3f>> segments,
+            std::span<const unsigned> buckets);
 
         /// Return the object under the mouse cursor / crosshair position, given by nX and nY normalized screen
         /// coordinates, where (0,0) is the top left corner.
@@ -214,6 +233,12 @@ namespace MWRender
             bool loop = false);
 
         void removeEffect(std::string_view effectId);
+        void spawnBrutalImpact(std::string_view kind, const osg::Vec3f& position,
+            const osg::Vec3f& direction, float intensity, bool power);
+        bool spawnBrutalDecapitation(const osg::Vec3f& lowerCenter, const osg::Vec3f& lowerNormal,
+            const osg::Vec3f& upperCenter, const osg::Vec3f& upperNormal, const osg::Vec3f& inheritedVelocity);
+        std::map<std::string, double> getBrutalImpactStats() const;
+
 
         /// Clear all savegame-specific data
         void clear();
@@ -342,6 +367,7 @@ namespace MWRender
         osg::ref_ptr<osgViewer::Viewer> mViewer;
         osg::ref_ptr<osg::Group> mRootNode;
         osg::ref_ptr<SceneUtil::LightManager> mSceneRoot;
+        osg::ref_ptr<osg::NodeCallback> mSwordClinchPoseCallback;
         Resource::ResourceSystem* mResourceSystem;
 
         osg::ref_ptr<SceneUtil::WorkQueue> mWorkQueue;
@@ -366,6 +392,10 @@ namespace MWRender
         std::unique_ptr<ScreenshotManager> mScreenshotManager;
         std::unique_ptr<EffectManager> mEffectManager;
         std::unique_ptr<SceneUtil::ShadowManager> mShadowManager;
+        osg::ref_ptr<SceneUtil::OcclusionCuller> mOcclusionCuller;
+        osg::ref_ptr<SceneOcclusionCallback> mSceneOcclusionCallback;
+        std::unique_ptr<Terrain::TerrainOccluder> mTerrainOccluder;
+        std::unique_ptr<OcclusionCulling::OcclusionStorage> mOcclusionStorage;
         osg::ref_ptr<PostProcessor> mPostProcessor;
         osg::ref_ptr<NpcAnimation> mPlayerAnimation;
         osg::ref_ptr<SceneUtil::PositionAttitudeTransform> mPlayerNode;

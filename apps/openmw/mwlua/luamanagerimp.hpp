@@ -101,7 +101,16 @@ namespace MWLua
         void jailTimeServed(const MWWorld::Ptr& actor, int days) override;
         void onHit(const MWWorld::Ptr& attacker, const MWWorld::Ptr& victim, const MWWorld::Ptr& weapon,
             const MWWorld::Ptr& ammo, int attackType, float attackStrength, float damage, bool isHealth,
-            const osg::Vec3f& hitPos, bool successful, MWMechanics::DamageSourceType sourceType) override;
+            const osg::Vec3f& hitPos, bool successful, MWMechanics::DamageSourceType sourceType,
+            uint64_t brutalAttackId = 0, bool brutalPowered = false, bool brutalBlocked = false, int contactPart = -1) override;
+        void meleeResolved(const MWWorld::Ptr& attacker, const MWWorld::Ptr& victim, const MWWorld::Ptr& weapon,
+            uint64_t attackId, const std::string& token, bool powered, bool successful, bool blocked,
+            float damage, float strength, const osg::Vec3f& hitPos) override;
+        void swordClinchResolved(const MWWorld::Ptr& player, const MWWorld::Ptr& opponent,
+            uint64_t id, std::string_view result, std::string_view reason, int clicks, int requiredClicks) override;
+        void actorExternalImpact(const MWWorld::Ptr& actor, const MWWorld::Ptr& hitObject,
+            const osg::Vec3f& position, const osg::Vec3f& normal, float speed) override;
+        void npcKickRagdoll(const MWWorld::Ptr& attacker, const MWWorld::Ptr& target) override;
         void exteriorCreated(MWWorld::CellStore& cell) override
         {
             mEngineEvents.addToQueue(EngineEvents::OnNewExterior{ cell });
@@ -233,6 +242,29 @@ namespace MWLua
             sol::main_object mArg;
         };
         std::vector<CallbackWithData> mQueuedCallbacks;
+
+        // Number of consecutive frames LuaManager::update() has thrown. Used to throttle the error log and
+        // to recover: on failure the transient Lua queues are flushed so a single poison entry can't keep
+        // aborting the whole update every frame (which previously required the player to save/reload).
+        // Runs one stage of update(); a failure is reported (with the stage name) and the frame goes on.
+        template <class F>
+        void guardedStage(std::string_view what, F&& f)
+        {
+            try
+            {
+                f();
+            }
+            catch (const std::exception& e)
+            {
+                reportFailure(what, &e);
+            }
+            catch (...)
+            {
+                reportFailure(what, nullptr);
+            }
+        }
+        void reportFailure(std::string_view what, const std::exception* e);
+        std::map<std::string, int, std::less<>> mFailureCounts;
 
         // Queued actions that should be done in main thread. Processed by applyQueuedChanges().
         class DelayedAction

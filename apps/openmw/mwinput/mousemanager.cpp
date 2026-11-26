@@ -1,5 +1,7 @@
 #include "mousemanager.hpp"
 
+#include <cmath>
+
 #include <MyGUI_Button.h>
 #include <MyGUI_InputManager.h>
 #include <MyGUI_LayerManager.h>
@@ -45,12 +47,14 @@ namespace MWInput
         , mLastWarpY(-1)
         , mMouseMoveX(0)
         , mMouseMoveY(0)
+        , mFlickX(0.f)
+        , mFlickY(0.f)
         // ## VR_PATCH BEGIN
         , mPreviousXAxis(0.f)
     // ## VR_PATCH END
     {
         int w, h;
-        SDL_GetWindowSize(window, &w, &h);
+        SDL_GL_GetDrawableSize(window, &w, &h);
 
         float uiScale = MWBase::Environment::get().getWindowManager()->getScalingFactor();
         mGuiCursorX = w / (2.f * uiScale);
@@ -125,6 +129,12 @@ namespace MWInput
         if (mMouseLookEnabled && !input->controlsDisabled())
         {
             MWBase::World* world = MWBase::Environment::get().getWorld();
+
+            // Accumulate the raw screen-space motion for directional melee attacks. Uses raw pixels so
+            // the flick direction is independent of camera sensitivity/invert (the attack layout has its
+            // own invert setting). y is positive downward, matching SDL relative motion.
+            mFlickX += static_cast<float>(arg.xrel);
+            mFlickY += static_cast<float>(arg.yrel);
 
             const float cameraSensitivity = Settings::input().mCameraSensitivity;
             float x = arg.xrel * cameraSensitivity * (Settings::input().mInvertXAxis ? -1 : 1) / 256.f;
@@ -261,6 +271,11 @@ namespace MWInput
     {
         SDL_GetRelativeMouseState(&mMouseMoveX, &mMouseMoveY);
 
+        // Time-decay the directional-attack flick so only motion from roughly the last ~0.12s counts.
+        const float flickDecay = std::exp(-dt / 0.12f);
+        mFlickX *= flickDecay;
+        mFlickY *= flickDecay;
+
         if (!mMouseLookEnabled)
             return;
 
@@ -276,6 +291,10 @@ namespace MWInput
         float yAxis = mBindingsManager->getActionValue(A_LookUpDown) * 2.0f - 1.0f;
         if (xAxis == 0 && yAxis == 0)
             return;
+
+        // Feed gamepad/stick look into the flick accumulator too, in mouse-pixel-equivalent units.
+        mFlickX += xAxis * dt * 1000.f;
+        mFlickY += yAxis * dt * 1000.f;
 
         const float cameraSensitivity = Settings::input().mCameraSensitivity;
         const float rot[3] = {
@@ -337,9 +356,12 @@ namespace MWInput
 
     void MouseManager::warpMouse()
     {
-        //float guiUiScale = Settings::gui().mScalingFactor;
-        // mInputWrapper->warpMouse(
-        //     static_cast<int>(mGuiCursorX * guiUiScale), static_cast<int>(mGuiCursorY * guiUiScale));
+        // VR has no desktop mouse cursor to warp.
+        if (VR::getVR())
+            return;
+        float guiUiScale = MWBase::Environment::get().getWindowManager()->getScalingFactor();
+        mInputWrapper->warpMouseInDrawable(
+            static_cast<int>(mGuiCursorX * guiUiScale), static_cast<int>(mGuiCursorY * guiUiScale));
     }
 
     // ## VR_PATCH BEGIN

@@ -17,6 +17,8 @@
 #include <components/sceneutil/util.hpp>
 #include <components/vfs/pathutil.hpp>
 
+#include <osg/MatrixTransform>
+#include <optional>
 #include <map>
 #include <span>
 #include <string>
@@ -121,6 +123,10 @@ namespace MWRender
 
         virtual bool updateCarriedLeftVisible(const int weaptype) const { return false; }
 
+        // Only the separate player torso/legs opt into visual crouch crossfades.
+        virtual bool useBodyCrouchTransitions() const { return false; }
+        virtual bool usePrimaryCrouchTransitions() const { return false; }
+
         typedef std::unordered_map<std::string, osg::ref_ptr<osg::MatrixTransform>, Misc::StringUtils::CiHash,
             Misc::StringUtils::CiEqual>
             NodeMap;
@@ -155,6 +161,11 @@ namespace MWRender
             const SceneUtil::TextKeyMap& getTextKeys() const;
 
             osg::ref_ptr<const SceneUtil::AnimBlendRules> mAnimBlendRules;
+            bool mImportedNpcBlending = false;
+            bool mImportedFamilyArms = false;
+            bool mImportedFarArms = false; // Dagger and staff sets: see familyClinchArmBlendRules.
+            bool mImportedDaggerArms = false;
+            std::map<std::weak_ptr<float>, float, std::owner_less<std::weak_ptr<float>>> mDaggerClockStarts;
         };
 
         struct AnimState
@@ -188,6 +199,10 @@ namespace MWRender
         };
 
         typedef std::map<std::string, AnimState, std::less<>> AnimStateMap;
+
+        /// Loop markers of a state's group in its own source, within the state's start..stop range.
+        /// Falls back to start..stop when the group has no loop markers.
+        std::pair<float, float> getLoopRange(const AnimState& state) const;
         AnimStateMap mStates;
 
         typedef std::vector<std::shared_ptr<AnimSource>> AnimSourceList;
@@ -223,6 +238,12 @@ namespace MWRender
 
         mutable NodeMap mNodeMap;
         mutable bool mNodeMapCreated;
+        bool mRagdollPose = false;
+        std::shared_ptr<float> mRagdollRecoveryProgress;
+        float mRagdollRecoveryDuration=0.f;
+        ActiveControllersVector mRagdollRecoveryControllers;
+        int mRequestedActive = 2;
+        std::vector<std::pair<osg::ref_ptr<osg::MatrixTransform>, osg::Matrixf>> mRagdollLocalPose;
 
         MWWorld::Ptr mPtr;
 
@@ -243,6 +264,15 @@ namespace MWRender
 
         osg::ref_ptr<RotateController> addRotateController(std::string_view bone);
 
+        /// Scans this actor's skeleton for known jiggle-bone names (breast/butt
+        /// secondary-motion bones added by some body-replacer meshes) and attaches
+        /// a JiggleBoneController directly to each one found. Unlike
+        /// addRotateController()/addControllers(), these are not tracked in
+        /// mActiveControllers - they must persist across animation-group changes,
+        /// not be reset by them. Cleanup is automatic: the controllers live on
+        /// nodes owned by mObjectRoot, so they're destroyed with it.
+        void attachJiggleBoneControllers();
+
         bool mHasMagicEffects;
 
         osg::ref_ptr<SceneUtil::LightSource> mGlowLight;
@@ -258,6 +288,9 @@ namespace MWRender
 
         bool mPlayScriptedOnly;
         bool mRequiresBoneMap;
+        // Secondary body sync installs its complete visual state map atomically.
+        bool mDeferActiveGroupReset = false;
+        bool mDeferredActiveGroupReset = false;
 
         const NodeMap& getNodeMap() const;
 
@@ -294,7 +327,8 @@ namespace MWRender
          *      (useful for NPCs, where only the skeleton is needed for the root, and the actual NPC parts are then
          * assembled from separate files).
          */
-        void setObjectRoot(const std::string& model, bool forceskeleton, bool baseonly, bool isCreature);
+        void setObjectRoot(
+            const std::string& model, bool forceskeleton, bool baseonly, bool isCreature, bool enableJiggleBones = false);
 
         void loadAdditionalAnimations(VFS::Path::NormalizedView model, const std::string& baseModel);
 
@@ -349,6 +383,9 @@ namespace MWRender
         osg::Group* getOrCreateObjectRoot();
 
         osg::Group* getObjectRoot();
+
+        /// Get the skeleton for this animation, may be nullptr
+        SceneUtil::Skeleton* getSkeleton() { return mSkeleton; }
 
         /**
          * @brief Add an effect mesh attached to a bone or the insert scene node
@@ -436,6 +473,9 @@ namespace MWRender
 
         /// Get the absolute position in the animation track of the text key
         float getTextKeyTime(std::string_view textKey) const;
+        // Whether the top source holding `owner` also holds `key`. getTextKeyTime searches every source, so
+        // a key missing from the active weapon set would otherwise be found in a set beneath it.
+        bool activeSourceHasTextKey(std::string_view owner, std::string_view key) const;
 
         /// Get the current absolute position in the animation track for the animation that is currently playing from
         /// the given group.
@@ -446,10 +486,62 @@ namespace MWRender
          */
         void disable(std::string_view groupname);
 
+        /** Disables all currently playing animations.
+         * Used when ragdoll takes over bone control.
+         */
+        void disableAllAnimations();
+        /// Defer resetActiveGroups() across remove/play sequences so blend history is not
+        /// overwritten by an underlying idle pose between disabling and re-playing a group.
+        class ScopedDeferActiveGroupReset
+        {
+        public:
+            explicit ScopedDeferActiveGroupReset(Animation& anim)
+                : mAnim(anim)
+                , mPrev(anim.mDeferActiveGroupReset)
+            {
+                mAnim.mDeferActiveGroupReset = true;
+            }
+            ~ScopedDeferActiveGroupReset()
+            {
+                mAnim.mDeferActiveGroupReset = mPrev;
+                if (!mPrev && mAnim.mDeferredActiveGroupReset)
+                    mAnim.resetActiveGroups();
+            }
+            ScopedDeferActiveGroupReset(const ScopedDeferActiveGroupReset&) = delete;
+            ScopedDeferActiveGroupReset& operator=(const ScopedDeferActiveGroupReset&) = delete;
+
+        private:
+            Animation& mAnim;
+            bool mPrev;
+        };
+
         /** Retrieves the velocity (in units per second) that the animation will move. */
         float getVelocity(std::string_view groupname) const;
 
         virtual osg::Vec3f runAnimation(float duration);
+
+        // Remove a rendered-only correction before controllers capture or advance their source pose.
+        virtual void restoreTransientPose() {}
+
+        // World transforms are applied parents first after physics moves the actor root.
+        std::optional<osg::Matrixf> getBoneWorldMatrix(std::string_view bone) const;
+        void setBoneWorldMatrix(std::string_view bone, const osg::Matrixf& world);
+        void stopAllAnimations();
+        // Explicit ownership keeps animation callbacks from replacing Bullet's pose.
+        void beginRagdollPose();
+        void endRagdollPose(float recoveryDuration=0.f);
+        bool isRagdollPose() const { return mRagdollPose; }
+        // Current world-space hand/foot surfaces, including equipped gloves/boots.
+        // Called once after beginRagdollPose freezes their descendant transforms.
+        using RagdollExtremityVertices = std::map<std::string, std::vector<osg::Vec3f>, std::less<>>;
+        using UnsupportedRagdollExtremityBones = std::map<std::string, unsigned, std::less<>>;
+        virtual RagdollExtremityVertices getRagdollExtremityVertices(
+            UnsupportedRagdollExtremityBones* unsupportedBones = nullptr) const
+        {
+            if (unsupportedBones)
+                unsupportedBones->clear();
+            return {};
+        }
 
         void setLoopingEnabled(std::string_view groupname, bool enabled);
 
@@ -467,6 +559,7 @@ namespace MWRender
         void setPlayScriptedOnly(bool playScriptedOnly) { mPlayScriptedOnly = playScriptedOnly; }
 
         virtual bool useShieldAnimations() const { return false; }
+        virtual bool useBrutalStaffSet() const { return false; }
         virtual bool getWeaponsShown() const { return false; }
         virtual void showWeapons(bool showWeapon) {}
         virtual bool getCarriedLeftShown() const { return false; }

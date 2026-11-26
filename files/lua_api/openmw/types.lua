@@ -107,6 +107,35 @@
 -- @field [parent=#Actor] #STANCE STANCE
 
 ---
+-- Brutal Morrowind engine extension: add a world-space velocity delta.
+-- Only available to the actor's own local script. Queued until the next physics
+-- step. Units are game units/second; this API has no physical mass parameter.
+-- Rejects non-finite vectors and individual deltas longer than 2000 units/s.
+-- Grounded horizontal velocity decelerates at 850 units/s^2. Vertical launches
+-- use native gravity and landing. Swimming/flying external velocity is damped.
+-- State is transient across save/load; horizontal velocity clears on teleport,
+-- death, deactivation and world changes. No effect with actor collision disabled.
+-- A blocking non-walkable contact caused by horizontal external velocity sends
+-- BrutalNativeImpact {speed, hitPos, normal, hitObject?} to this actor; at most one
+-- strongest contact per physics frame. Ordinary falls remain native fall damage.
+-- @function [parent=#Actor] addExternalVelocity
+-- @param openmw.self#SelfObject actor Must be self.
+-- @param openmw.util#Vector3 delta World-space velocity increment.
+
+---
+-- Brutal engine: request the player's held shield block (setting `player active shield block`).
+-- The controller raises the shield only with a shield equipped and a weapon drawn, and not mid-attack.
+-- @function [parent=#Actor] setShieldBlock
+-- @param openmw.self#SelfObject actor Must be the player's self.
+-- @param #boolean held
+
+---
+-- Brutal engine: true while the player's shield is raised and blocks frontal melee blows.
+-- @function [parent=#Actor] isShieldBlockRaised
+-- @param openmw.core#GameObject actor
+-- @return #boolean
+
+---
 -- Returns true if the object is an actor and is able to move. For dead, paralyzed,
 -- or knocked down actors it returns false.
 -- @function [parent=#Actor] canMove
@@ -1128,6 +1157,39 @@
 -- player.type.setWerewolf(player, true)
 -- @usage -- Transform self back to normal in a local script
 -- self.type.setWerewolf(self, false)
+
+---
+-- Whether body jiggle is on for an NPC or the player (fork extension). A script override set with
+-- @{#NPC.setJiggleEnabled} wins; otherwise the player follows "jiggle player enabled" and NPCs
+-- follow "jiggle npc enabled names".
+-- @function [parent=#NPC] isJiggleEnabled
+-- @param openmw.core#GameObject actor
+-- @return #boolean
+
+---
+-- Force body jiggle on or off for one NPC or the player (fork extension), or pass nil to go back
+-- to the settings. Useful for actors a mod spawns to stand in for others, such as animation
+-- doubles. Overrides last until the game is started or loaded again, so set them again on load.
+-- Can only be used in global scripts or on self in local scripts.
+-- @function [parent=#NPC] setJiggleEnabled
+-- @param openmw.core#GameObject actor
+-- @param #boolean enabled true, false, or nil to clear the override
+-- @usage -- Give a spawned double the same jiggle as the player
+-- types.NPC.setJiggleEnabled(double, types.NPC.isJiggleEnabled(player))
+
+---
+-- Whether an NPC is drawn without its race's height and weight scaling (fork extension).
+-- @function [parent=#NPC] isRaceScaleIgnored
+-- @param openmw.core#GameObject actor
+-- @return #boolean
+
+---
+-- Draw an NPC at height and weight 1 whatever its race (fork extension), so actors of different races
+-- play paired animations exactly as authored. The actor's own scale still applies. Lasts until the game
+-- is started or loaded again. Can only be used in global scripts or on self in local scripts.
+-- @function [parent=#NPC] setRaceScaleIgnored
+-- @param openmw.core#GameObject actor
+-- @param #boolean ignored
 
 ---
 -- Returns the read-only @{#NpcRecord} of an NPC

@@ -1,25 +1,18 @@
 #ifndef OPENMW_MWPHYSICS_COLLISIONTYPE_H
 #define OPENMW_MWPHYSICS_COLLISIONTYPE_H
 
+#include "joltlayers.hpp"
+
 namespace MWPhysics
 {
-
-    enum CollisionType
-    {
-        CollisionType_World = 1 << 0,
-        CollisionType_Door = 1 << 1,
-        CollisionType_Actor = 1 << 2,
-        CollisionType_HeightMap = 1 << 3,
-        CollisionType_Projectile = 1 << 4,
-        CollisionType_Water = 1 << 5,
-        CollisionType_Default
-        = CollisionType_World | CollisionType_HeightMap | CollisionType_Actor | CollisionType_Door,
-        CollisionType_AnyPhysical = CollisionType_World | CollisionType_HeightMap | CollisionType_Actor
-            | CollisionType_Door | CollisionType_Projectile | CollisionType_Water,
-        CollisionType_CameraOnly = 1 << 6,
-        CollisionType_VisualOnly = 1 << 7
-    };
-
+    // Shared gameplay query names mapped to the native Jolt layers.
+    inline constexpr int CollisionType_None = 0;
+    inline constexpr int CollisionType_World = Layers::WORLD;
+    inline constexpr int CollisionType_HeightMap = Layers::HEIGHTMAP;
+    inline constexpr int CollisionType_Door = Layers::DOOR;
+    inline constexpr int CollisionType_Actor = Layers::ACTOR;
+    inline constexpr int CollisionType_Player = Layers::ACTOR;
+    inline constexpr int CollisionType_Dynamic = Layers::DYNAMIC_WORLD;
 }
 
 #endif

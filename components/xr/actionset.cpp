@@ -25,7 +25,15 @@ namespace XR
 
     ActionSet::~ActionSet()
     {
-        if (mActionSet)
+        // xrDestroyActionSet also destroys the set's actions, so the actions go first.
+        mAllInputActions.clear();
+        mBoolActions.clear();
+        mFloatActions.clear();
+        mAxisActions.clear();
+        mPoseActions.clear();
+        mHapticsActions.clear();
+
+        if (mActionSet && !Instance::xrInstanceDestroyed())
         {
             CHECK_XRCMD(xrDestroyActionSet(mActionSet));
         }

@@ -37,14 +37,14 @@ option(BUILD_ESSIMPORTER        "Build ESS (Morrowind save game) importer" ON)
 option(BUILD_BSATOOL            "Build BSA extractor" ON)
 option(BUILD_ESMTOOL            "Build ESM inspector" ON)
 option(BUILD_NIFTEST            "Build nif file tester" ON)
+option(BUILD_RESUMELAUNCHER     "Build ResumeLauncher (Windows-only: launches openmw.exe straight into the most recent save)" ON)
 option(BUILD_DOCS               "Build documentation." OFF )
 option(BUILD_WITH_CODE_COVERAGE "Enable code coverage with gconv" OFF)
-option(BUILD_COMPONENTS_TESTS   "Build components library tests" OFF)
+option(BUILD_UNITTESTS          "Enable Unittests with Google C++ Unittest" OFF)
 option(BUILD_BENCHMARKS         "Build benchmarks with Google Benchmark" OFF)
 option(BUILD_NAVMESHTOOL        "Build navmesh tool" ON)
-option(BUILD_BULLETOBJECTTOOL   "Build Bullet object tool" ON)
+option(BUILD_PHYSICSOBJECTTOOL   "Build Physics object tool" ON)
 option(BUILD_OPENCS_TESTS       "Build OpenMW Construction Set tests" OFF)
-option(BUILD_OPENMW_TESTS       "Build OpenMW tests" OFF)
 option(PRECOMPILE_HEADERS_WITH_MSVC "Precompile most common used headers with MSVC (alternative to ccache)" ON)
 
 # On Android, the VR build is the only sensible target (Quest etc.); it is folded
@@ -86,12 +86,18 @@ message(STATUS "Configuring OpenMW...")
 set(OPENMW_VERSION_MAJOR 0)
 set(OPENMW_VERSION_MINOR 51)
 set(OPENMW_VERSION_RELEASE 0)
-set(OPENMW_LUA_API_REVISION 129)
+set(OPENMW_LUA_API_REVISION 130)
 set(OPENMW_POSTPROCESSING_API_REVISION 5)
 
 set(OPENMW_VERSION_COMMITHASH "")
 set(OPENMW_VERSION_TAGHASH "")
 set(OPENMW_VERSION_COMMITDATE "")
+
+# Brutal Morrowind product version; the engine base stays OPENMW_VERSION.
+set(BRUTAL_VERSION_MAJOR 0)
+set(BRUTAL_VERSION_MINOR 2)
+set(BRUTAL_VERSION_RELEASE 1)
+set(BRUTAL_VERSION "${BRUTAL_VERSION_MAJOR}.${BRUTAL_VERSION_MINOR}.${BRUTAL_VERSION_RELEASE}")
 
 set(OPENMW_VERSION "${OPENMW_VERSION_MAJOR}.${OPENMW_VERSION_MINOR}.${OPENMW_VERSION_RELEASE}")
 
@@ -128,15 +134,12 @@ include(WholeArchive)
 
 configure_file ("${OpenMW_SOURCE_DIR}/docs/mainpage.hpp.cmake" "${OpenMW_BINARY_DIR}/docs/mainpage.hpp")
 
+option(BOOST_STATIC "Link static build of Boost into the binaries" FALSE)
 option(QT_STATIC "Link static build of Qt into the binaries" FALSE)
 
-option(OPENMW_USE_SYSTEM_BULLET "Use system provided bullet physics library" ON)
-if(OPENMW_USE_SYSTEM_BULLET)
-    set(_bullet_static_default OFF)
-else()
-    set(_bullet_static_default ON)
-endif()
-option(BULLET_STATIC "Link static build of Bullet into the binaries" ${_bullet_static_default})
+set(_jolt_static_default ON)
+option(JOLT_STATIC "Build Jolt Physics static libraries" ${_jolt_static_default})
+add_definitions(-DJPH_DEBUG_RENDERER=1)
 
 option(OPENMW_USE_SYSTEM_OSG "Use system provided OpenSceneGraph libraries" ON)
 if(OPENMW_USE_SYSTEM_OSG)
@@ -157,7 +160,7 @@ option(MYGUI_STATIC "Link static build of Mygui into the binaries" ${_mygui_stat
 option(OPENMW_USE_SYSTEM_RECASTNAVIGATION "Use system provided recastnavigation library" OFF)
 if(OPENMW_USE_SYSTEM_RECASTNAVIGATION)
     set(_recastnavigation_static_default OFF)
-    find_package(RecastNavigation REQUIRED CONFIG)
+    find_package(RecastNavigation REQUIRED)
 else()
     set(_recastnavigation_static_default ON)
 endif()
@@ -170,6 +173,13 @@ option(OPENMW_USE_SYSTEM_GOOGLETEST "Use system Google Test library." OFF)
 
 option(OPENMW_UNITY_BUILD "Use fewer compilation units to speed up compile time" FALSE)
 option(OPENMW_LTO_BUILD "Build OpenMW with Link-Time Optimization (Needs ~2GB of RAM)" OFF)
+
+# what is necessary to build documentation
+IF( BUILD_DOCS )
+    # Builds the documentation.
+    FIND_PACKAGE( Sphinx REQUIRED )
+    FIND_PACKAGE( Doxygen REQUIRED )
+ENDIF()
 
 # OS X deployment
 option(OPENMW_OSX_DEPLOYMENT OFF)
@@ -243,15 +253,15 @@ elseif(UNIX)
     SET(LIBDIR "${CMAKE_INSTALL_PREFIX}/lib${LIB_SUFFIX}" CACHE PATH "Where to install libraries")
     SET(DATAROOTDIR "${CMAKE_INSTALL_DATAROOTDIR}" CACHE PATH "Sets the root of data directories to a non-default location")
     SET(GLOBAL_DATA_PATH "${CMAKE_INSTALL_PREFIX}/share/games/" CACHE PATH "Set data path prefix")
-    SET(DATADIR "${GLOBAL_DATA_PATH}/openmw" CACHE PATH "Sets the openmw data directories to a non-default location")
+    SET(DATADIR "${GLOBAL_DATA_PATH}/brutalmorrowind" CACHE PATH "Sets the openmw data directories to a non-default location")
     SET(ICONDIR "${DATAROOTDIR}/pixmaps" CACHE PATH "Set icon dir")
-    SET(LICDIR "${DATAROOTDIR}/licenses/openmw" CACHE PATH "Sets the openmw license directory to a non-default location.")
+    SET(LICDIR "${DATAROOTDIR}/licenses/brutalmorrowind" CACHE PATH "Sets the openmw license directory to a non-default location.")
     IF("${CMAKE_INSTALL_PREFIX}" STREQUAL "/usr")
         SET(GLOBAL_CONFIG_PATH "/etc/" CACHE PATH "Set config dir prefix")
     ELSE()
         SET(GLOBAL_CONFIG_PATH "${CMAKE_INSTALL_PREFIX}/etc/" CACHE PATH "Set config dir prefix")
     ENDIF()
-    SET(SYSCONFDIR "${GLOBAL_CONFIG_PATH}/openmw" CACHE PATH "Set config dir")
+    SET(SYSCONFDIR "${GLOBAL_CONFIG_PATH}/brutalmorrowind" CACHE PATH "Set config dir")
 
     set(OPENMW_RESOURCE_FILES "${DATADIR}/resources" CACHE PATH "location of OpenMW resources files")
 else()
@@ -267,22 +277,17 @@ if(MSVC)
 endif()
 
 # Dependencies
-if (APPLE)
-    # Force CMake to use the installed version of OpenGL on macOS
-    set(_SAVE_CMAKE_FIND_FRAMEWORK ${CMAKE_FIND_FRAMEWORK})
-    set(CMAKE_FIND_FRAMEWORK ONLY)
-    find_package(OpenGL REQUIRED)
-    set(CMAKE_FIND_FRAMEWORK ${_SAVE_CMAKE_FIND_FRAMEWORK})
-    unset(_SAVE_CMAKE_FIND_FRAMEWORK)
-else()
-    find_package(OpenGL REQUIRED)
-endif()
+find_package(OpenGL REQUIRED)
 
 find_package(LZ4 REQUIRED)
 
 if (USE_QT)
-    find_package(QT REQUIRED COMPONENTS Core NAMES Qt6)
-    find_package(Qt6 COMPONENTS Core Widgets Network OpenGL OpenGLWidgets LinguistTools Svg REQUIRED)
+    find_package(QT REQUIRED COMPONENTS Core NAMES Qt6 Qt5)
+    if (QT_VERSION_MAJOR VERSION_EQUAL 5)
+        find_package(Qt5 5.15 COMPONENTS Core Widgets Network OpenGL LinguistTools Svg REQUIRED)
+    else()
+        find_package(Qt6 COMPONENTS Core Widgets Network OpenGL OpenGLWidgets LinguistTools Svg REQUIRED)
+    endif()
     message(STATUS "Using Qt${QT_VERSION}")
 endif()
 
@@ -340,7 +345,7 @@ if (OPENMW_USE_SYSTEM_YAML_CPP)
     find_package(yaml-cpp REQUIRED)
 endif()
 
-if ((BUILD_COMPONENTS_TESTS OR BUILD_OPENCS_TESTS OR BUILD_OPENMW_TESTS) AND OPENMW_USE_SYSTEM_GOOGLETEST)
+if ((BUILD_UNITTESTS OR BUILD_OPENCS_TESTS) AND OPENMW_USE_SYSTEM_GOOGLETEST)
     find_package(GTest 1.10 REQUIRED)
     find_package(GMock 1.10 REQUIRED)
 endif()
@@ -357,8 +362,8 @@ find_package(FFmpeg REQUIRED COMPONENTS AVCODEC AVFORMAT AVUTIL SWSCALE SWRESAMP
 if(FFmpeg_FOUND)
     SET(FFVER_OK TRUE)
 
-    # Can not detect FFmpeg version on Windows or Android for now
-    if (NOT WIN32 AND NOT ANDROID)
+    # Can not detect FFmpeg version on Windows for now
+    if (NOT WIN32)
         if(FFmpeg_AVFORMAT_VERSION VERSION_LESS "57.56.100")
             message(STATUS "libavformat is too old! (${FFmpeg_AVFORMAT_VERSION}, wanted 57.56.100)")
             set(FFVER_OK FALSE)
@@ -392,6 +397,8 @@ endif()
 
 # Required for building the FFmpeg headers
 add_compile_definitions(__STDC_CONSTANT_MACROS)
+# Required for unity build
+add_definitions(-DMYGUI_DONT_REPLACE_NULLPTR)
 
 # TinyXML
 option(USE_SYSTEM_TINYXML "Use system TinyXML library instead of internal." OFF)
@@ -403,6 +410,11 @@ endif()
 
 # Platform specific
 if (WIN32)
+    if(NOT MINGW)
+    set(Boost_USE_STATIC_LIBS   ON)
+    add_definitions(-DBOOST_ALL_NO_LIB)
+    endif(NOT MINGW)
+
     # Suppress WinMain(), provided by SDL
     add_compile_definitions(SDL_MAIN_HANDLED)
 
@@ -420,39 +432,13 @@ if (WIN32)
         _UNICODE
         UNICODE
     )
-endif()
 
-if(OPENMW_USE_SYSTEM_BULLET)
-    set(REQUIRED_BULLET_VERSION 286) # Bullet 286 required due to runtime bugfixes for btCapsuleShape
-    if (DEFINED ENV{TRAVIS_BRANCH} OR DEFINED ENV{APPVEYOR})
-        set(REQUIRED_BULLET_VERSION 283) # but for build testing, 283 is fine
-    endif()
-
-    # First, try BulletConfig-float64.cmake which comes with Debian derivatives.
-    # This file does not define the Bullet version in a CMake-friendly way.
-    find_package(Bullet CONFIGS BulletConfig-float64.cmake QUIET COMPONENTS BulletCollision LinearMath)
-    if (BULLET_FOUND)
-        string(REPLACE "." "" _bullet_version_num ${BULLET_VERSION_STRING})
-        if (_bullet_version_num VERSION_LESS REQUIRED_BULLET_VERSION)
-            message(FATAL_ERROR "System bullet version too old, OpenMW requires at least ${REQUIRED_BULLET_VERSION}, got ${_bullet_version_num}")
-        endif()
-        # Fix the relative include:
-        set(BULLET_INCLUDE_DIRS "${BULLET_ROOT_DIR}/${BULLET_INCLUDE_DIRS}")
-        include(FindPackageMessage)
-        find_package_message(Bullet "Found Bullet: ${BULLET_LIBRARIES} ${BULLET_VERSION_STRING}" "${BULLET_VERSION_STRING}-float64")
-    else()
-        find_package(Bullet ${REQUIRED_BULLET_VERSION} REQUIRED COMPONENTS BulletCollision LinearMath)
-    endif()
-
-    # Only link the Bullet libraries that we need:
-    string(REGEX MATCHALL "((optimized|debug);)?[^;]*(BulletCollision|LinearMath)[^;]*" BULLET_LIBRARIES "${BULLET_LIBRARIES}")
-
-    include(cmake/CheckBulletPrecision.cmake)
-    if (HAS_DOUBLE_PRECISION_BULLET)
-        message(STATUS "Bullet uses double precision")
-    else()
-        message(FATAL_ERROR "Bullet does not uses double precision")
-    endif()
+    # Put Win32 API into UTF-16 mode
+    # We really don't care, but targets linking with Qt 6 (not 5 and earlier) inherit this, and mixing and matching stops us reusing precompiled headers
+    add_compile_definitions(
+        _UNICODE
+        UNICODE
+    )
 endif()
 
 if (NOT WIN32 AND BUILD_WIZARD) # windows users can just run the morrowind installer
@@ -494,13 +480,25 @@ if(HAVE_MULTIVIEW)
 endif(HAVE_MULTIVIEW)
 
 set(BOOST_COMPONENTS iostreams program_options)
+if(WIN32 AND MSVC)
+    # boost-zlib is not present (nor needed) in vcpkg version of boost.
+    # there, it is part of boost-iostreams instead.
+    set(BOOST_OPTIONAL_COMPONENTS zlib)
+endif()
+
+IF(BOOST_STATIC)
+    set(Boost_USE_STATIC_LIBS   ON)
+endif()
+
+set(Boost_NO_BOOST_CMAKE ON)
+set(Boost_NO_WARN_NEW_VERSIONS ON)  # ignore warnings about new releases of boost
 
 find_package(Boost 1.70.0 CONFIG REQUIRED COMPONENTS ${BOOST_COMPONENTS} OPTIONAL_COMPONENTS ${BOOST_OPTIONAL_COMPONENTS})
 
 if(OPENMW_USE_SYSTEM_MYGUI)
     find_package(MyGUI 3.4.3 REQUIRED)
 endif()
-find_package(SDL2 2.0.20 REQUIRED)
+find_package(SDL2 2.0.9 REQUIRED)
 find_package(OpenAL REQUIRED)
 find_package(ZLIB REQUIRED)
 
@@ -513,7 +511,7 @@ else(USE_LUAJIT)
     find_package(Lua REQUIRED)
     add_compile_definitions(NO_LUAJIT)
 endif(USE_LUAJIT)
-if (NOT WIN32 AND NOT ANDROID)
+if (NOT WIN32)
     include(cmake/CheckLuaCustomAllocator.cmake)
 endif()
 
@@ -523,16 +521,16 @@ set(SOL_CONFIG_DIR ${OpenMW_SOURCE_DIR}/extern/sol_config)
 
 include_directories(
     BEFORE SYSTEM
+    "."
+    ${Boost_INCLUDE_DIR}
     ${MyGUI_INCLUDE_DIRS}
     ${OPENAL_INCLUDE_DIR}
     ${OPENGL_INCLUDE_DIR}
-    ${BULLET_INCLUDE_DIRS}
     ${LUA_INCLUDE_DIR}
     ${SOL_INCLUDE_DIR}
     ${SOL_CONFIG_DIR}
     ${ICU_INCLUDE_DIRS}
 )
-include_directories(".")
 
 link_directories(${COLLADA_DOM_LIBRARY_DIRS})
 
@@ -579,19 +577,14 @@ pack_resource_file(${OpenMW_SOURCE_DIR}/files/settings-overrides-vr.cfg
 configure_resource_file(${OpenMW_SOURCE_DIR}/files/openmw.appdata.xml
     "${OpenMW_BINARY_DIR}" "openmw.appdata.xml")
 
-if (APPLE)
-    configure_file(${OpenMW_SOURCE_DIR}/files/openmw.cfg
-        "${OpenMW_BINARY_DIR}/openmw.cfg")
-elseif (WIN32)
-    configure_resource_file(${OpenMW_SOURCE_DIR}/files/openmw.cfg.local
-        "${OpenMW_BINARY_DIR}" "openmw.cfg")
-    configure_resource_file(${OpenMW_SOURCE_DIR}/files/openmw.cfg.local
-        "${OpenMW_BINARY_DIR}" "openmw.cfg.install")
-else ()
+if (NOT APPLE)
     configure_resource_file(${OpenMW_SOURCE_DIR}/files/openmw.cfg.local
         "${OpenMW_BINARY_DIR}" "openmw.cfg")
     configure_resource_file(${OpenMW_SOURCE_DIR}/files/openmw.cfg
         "${OpenMW_BINARY_DIR}" "openmw.cfg.install")
+else ()
+    configure_file(${OpenMW_SOURCE_DIR}/files/openmw.cfg
+        "${OpenMW_BINARY_DIR}/openmw.cfg")
 endif ()
 
 pack_resource_file(${OpenMW_SOURCE_DIR}/files/openmw-cs.cfg
@@ -605,10 +598,10 @@ configure_resource_file(${OpenMW_SOURCE_DIR}/files/gamecontrollerdb.txt
     "${OpenMW_BINARY_DIR}" "gamecontrollerdb.txt")
 
 if (NOT WIN32 AND NOT APPLE)
-    configure_file(${OpenMW_SOURCE_DIR}/files/org.openmw.launcher.desktop
-        "${OpenMW_BINARY_DIR}/org.openmw.launcher.desktop")
-    configure_file(${OpenMW_SOURCE_DIR}/files/openmw.appdata.xml
-        "${OpenMW_BINARY_DIR}/openmw.appdata.xml")
+    configure_file(${OpenMW_SOURCE_DIR}/files/brutalmorrowind.desktop
+        "${OpenMW_BINARY_DIR}/brutalmorrowind.desktop")
+    configure_file(${OpenMW_SOURCE_DIR}/files/brutalmorrowind.metainfo.xml
+        "${OpenMW_BINARY_DIR}/brutalmorrowind.metainfo.xml")
     configure_file(${OpenMW_SOURCE_DIR}/files/org.openmw.cs.desktop
         "${OpenMW_BINARY_DIR}/org.openmw.cs.desktop")
 endif()
@@ -627,10 +620,26 @@ if(OPENMW_LTO_BUILD)
     endif()
 endif()
 
-if (APPLE)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++")
-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -stdlib=libc++")
-endif()
+
+if (CMAKE_CXX_COMPILER_ID STREQUAL GNU OR CMAKE_CXX_COMPILER_ID STREQUAL Clang)
+    set(OPENMW_CXX_FLAGS "-Wall -Wextra -Wundef -Wextra-semi -Wno-unused-parameter -pedantic -Wno-long-long -Wnon-virtual-dtor -Wunused ${OPENMW_CXX_FLAGS}")
+    add_definitions( -DBOOST_NO_CXX11_SCOPED_ENUMS=ON )
+
+    if (APPLE)
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++")
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -stdlib=libc++")
+    endif()
+
+    if (CMAKE_CXX_COMPILER_ID STREQUAL Clang AND NOT APPLE)
+        if (CMAKE_CXX_COMPILER_VERSION VERSION_GREATER 3.6 OR CMAKE_CXX_COMPILER_VERSION VERSION_EQUAL 3.6)
+            set(OPENMW_CXX_FLAGS "${OPENMW_CXX_FLAGS} -Wno-potentially-evaluated-expression")
+        endif ()
+    endif()
+
+    if (CMAKE_CXX_COMPILER_ID STREQUAL GNU)
+        set(OPENMW_CXX_FLAGS "${OPENMW_CXX_FLAGS} -Wno-unused-but-set-parameter -Wduplicated-branches -Wduplicated-cond -Wlogical-op")
+    endif()
+endif (CMAKE_CXX_COMPILER_ID STREQUAL GNU OR CMAKE_CXX_COMPILER_ID STREQUAL Clang)
 
 # Extern
 
@@ -683,8 +692,7 @@ else ()
 endif ()
 
 if (OPENMW_CXX_FLAGS)
-    separate_arguments(OPENMW_CXX_FLAGS NATIVE_COMMAND "${OPENMW_CXX_FLAGS}")
-    add_compile_options(${OPENMW_CXX_FLAGS})
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OPENMW_CXX_FLAGS}")
 endif()
 
 # Components
@@ -707,6 +715,11 @@ if (BUILD_LAUNCHER)
     add_subdirectory( apps/launcher )
 endif()
 
+option(BUILD_DM_IMPORT "Install the Dark Messiah data importer" ON)
+if (BUILD_DM_IMPORT)
+    add_subdirectory( tools/dm-import )
+endif()
+
 if (BUILD_MWINIIMPORTER)
     add_subdirectory( apps/mwiniimporter )
 endif()
@@ -725,10 +738,15 @@ endif()
 
 if (BUILD_NIFTEST)
     add_subdirectory(apps/niftest)
+endif(BUILD_NIFTEST)
+
+if (WIN32 AND BUILD_RESUMELAUNCHER)
+    add_subdirectory(apps/resumelauncher)
 endif()
 
-if (BUILD_COMPONENTS_TESTS)
-    add_subdirectory(apps/components_tests)
+# UnitTests
+if (BUILD_UNITTESTS)
+    add_subdirectory(apps/openmw_tests)
 endif()
 
 if (BUILD_BENCHMARKS)
@@ -739,16 +757,12 @@ if (BUILD_NAVMESHTOOL)
     add_subdirectory(apps/navmeshtool)
 endif()
 
-if (BUILD_BULLETOBJECTTOOL)
-    add_subdirectory(apps/bulletobjecttool)
+if (BUILD_PHYSICSOBJECTTOOL)
+    add_subdirectory( apps/physicsobjecttool )
 endif()
 
 if (BUILD_OPENCS_TESTS)
     add_subdirectory(apps/opencs_tests)
-endif()
-
-if (BUILD_OPENMW_TESTS)
-    add_subdirectory(apps/openmw_tests)
 endif()
 
 if (WIN32)
@@ -790,6 +804,27 @@ if (WIN32)
             set_target_properties(openmw_vr PROPERTIES LINK_FLAGS_RELEASE "/SUBSYSTEM:WINDOWS")
             set_target_properties(openmw_vr PROPERTIES LINK_FLAGS_MINSIZEREL "/SUBSYSTEM:WINDOWS")
         endif()
+        # Play a bit with the warning levels
+
+        set(WARNINGS "/W4")
+
+        set(WARNINGS_DISABLE
+            4100 # Unreferenced formal parameter (-Wunused-parameter)
+            4127 # Conditional expression is constant
+            4996 # Function was declared deprecated
+            5054 # Deprecated operations between enumerations of different types caused by Qt headers
+            )
+
+        foreach(d ${WARNINGS_DISABLE})
+            list(APPEND WARNINGS "/wd${d}")
+        endforeach(d)
+
+        if(OPENMW_MSVC_WERROR)
+            list(APPEND WARNINGS "/WX")
+        endif()
+
+        target_compile_options(components PRIVATE ${WARNINGS})
+        target_compile_options(osg-ffmpeg-videoplayer PRIVATE ${WARNINGS})
 
         if (MSVC_VERSION GREATER_EQUAL 1915 AND MSVC_VERSION LESS 1920)
             target_compile_definitions(components INTERFACE _ENABLE_EXTENDED_ALIGNED_STORAGE)
@@ -798,6 +833,53 @@ if (WIN32)
             target_compile_options(openmw_vr PRIVATE ${WARNINGS})
         endif()
 
+        if (BUILD_BSATOOL)
+            target_compile_options(bsatool PRIVATE ${WARNINGS})
+        endif()
+
+        if (BUILD_ESMTOOL)
+            target_compile_options(esmtool PRIVATE ${WARNINGS})
+        endif()
+
+        if (BUILD_ESSIMPORTER)
+            target_compile_options(openmw-essimporter PRIVATE ${WARNINGS})
+        endif()
+
+        if (BUILD_LAUNCHER)
+            target_compile_options(openmw-launcher PRIVATE ${WARNINGS})
+        endif()
+
+        if (BUILD_MWINIIMPORTER)
+            target_compile_options(openmw-iniimporter PRIVATE ${WARNINGS})
+        endif()
+
+        if (BUILD_OPENCS)
+            target_compile_options(openmw-cs PRIVATE ${WARNINGS})
+        endif()
+
+        if (BUILD_OPENMW)
+            target_compile_options(openmw PRIVATE ${WARNINGS})
+        endif()
+
+        if (BUILD_WIZARD)
+            target_compile_options(openmw-wizard PRIVATE ${WARNINGS})
+        endif()
+
+        if (BUILD_UNITTESTS)
+            target_compile_options(openmw-tests PRIVATE ${WARNINGS})
+        endif()
+
+        if (BUILD_BENCHMARKS)
+            target_compile_options(openmw_detournavigator_navmeshtilescache_benchmark PRIVATE ${WARNINGS})
+        endif()
+
+        if (BUILD_NAVMESHTOOL)
+            target_compile_options(openmw-navmeshtool PRIVATE ${WARNINGS})
+        endif()
+
+        if (BUILD_PHYSICSOBJECTTOOL)
+            target_compile_options(openmw-physicsobjecttool PRIVATE ${WARNINGS} ${MT_BUILD})
+        endif()
     endif(MSVC)
 
     # TODO: At some point release builds should not use the console but rather write to a log file
@@ -892,6 +974,7 @@ if (OPENMW_OSX_DEPLOYMENT AND APPLE)
         set(BU_CHMOD_BUNDLE_ITEMS ON)
         set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH})
         include(BundleUtilities)
+        cmake_minimum_required(VERSION 3.1)
     " COMPONENT Runtime)
 
     set(ABSOLUTE_PLUGINS "")
@@ -941,11 +1024,6 @@ if (OPENMW_OSX_DEPLOYMENT AND APPLE)
     install_plugins_for_bundle("${APP_BUNDLE_NAME}" PLUGINS)
     install_plugins_for_bundle("${OPENCS_BUNDLE_NAME}" OPENCS_PLUGINS)
 
-    INSTALL(FILES "${OpenMW_SOURCE_DIR}/CHANGELOG.md" DESTINATION "/${INSTALLED_OPENMW_APP}/..")
-    INSTALL(FILES "${OpenMW_SOURCE_DIR}/README.md" DESTINATION "/${INSTALLED_OPENMW_APP}/..")
-    INSTALL(FILES "${OpenMW_SOURCE_DIR}/LICENSE" DESTINATION "/${INSTALLED_OPENMW_APP}/..")
-    INSTALL(FILES "${OpenMW_SOURCE_DIR}/AUTHORS.md" DESTINATION "/${INSTALLED_OPENMW_APP}/..")
-
     set(PLUGINS ${PLUGINS} "${INSTALLED_OPENMW_APP}/Contents/PlugIns/${QT_COCOA_PLUGIN_GROUP}/${QT_COCOA_PLUGIN_NAME}")
     set(PLUGINS ${PLUGINS} "${INSTALLED_OPENMW_APP}/Contents/PlugIns/${QT_QMACSTYLE_PLUGIN_GROUP}/${QT_QMACSTYLE_PLUGIN_NAME}")
     set(OPENCS_PLUGINS ${OPENCS_PLUGINS} "${INSTALLED_OPENCS_APP}/Contents/PlugIns/${QT_COCOA_PLUGIN_GROUP}/${QT_COCOA_PLUGIN_NAME}")
@@ -976,15 +1054,10 @@ elseif(NOT APPLE)
 
     if(WIN32)
         INSTALL(DIRECTORY "${INSTALL_SOURCE}/" DESTINATION "." FILES_MATCHING PATTERN "*.dll"
-                                                                              PATTERN ".cmake" EXCLUDE
-                                                                              PATTERN ".qt" EXCLUDE
-                                                                              PATTERN "_CPack_Packages" EXCLUDE
-                                                                              PATTERN "_deps" EXCLUDE
+                                                                              PATTERN "deps" EXCLUDE
                                                                               PATTERN "apps" EXCLUDE
-                                                                              PATTERN "bin" EXCLUDE
                                                                               PATTERN "CMakeFiles" EXCLUDE
                                                                               PATTERN "components" EXCLUDE
-                                                                              PATTERN "deps" EXCLUDE
                                                                               PATTERN "docs" EXCLUDE
                                                                               PATTERN "extern" EXCLUDE
                                                                               PATTERN "files" EXCLUDE
@@ -993,17 +1066,14 @@ elseif(NOT APPLE)
                                                                               PATTERN "symstore-venv" EXCLUDE
                                                                               PATTERN "Testing" EXCLUDE
                                                                               PATTERN "tests_output" EXCLUDE
+                                                                              PATTERN "tools" EXCLUDE
+                                                                              PATTERN "dm-import" EXCLUDE
                                                                               PATTERN "try-compile")
         INSTALL(DIRECTORY "${INSTALL_SOURCE}/" DESTINATION "." CONFIGURATIONS Debug;RelWithDebInfo FILES_MATCHING PATTERN "*.pdb"
-                                                                                                                  PATTERN ".cmake" EXCLUDE
-                                                                                                                  PATTERN ".qt" EXCLUDE
-                                                                                                                  PATTERN "_CPack_Packages" EXCLUDE
-                                                                                                                  PATTERN "_deps" EXCLUDE
+                                                                                                                  PATTERN "deps" EXCLUDE
                                                                                                                   PATTERN "apps" EXCLUDE
-                                                                                                                  PATTERN "bin" EXCLUDE
                                                                                                                   PATTERN "CMakeFiles" EXCLUDE
                                                                                                                   PATTERN "components" EXCLUDE
-                                                                                                                  PATTERN "deps" EXCLUDE
                                                                                                                   PATTERN "docs" EXCLUDE
                                                                                                                   PATTERN "extern" EXCLUDE
                                                                                                                   PATTERN "files" EXCLUDE
@@ -1012,12 +1082,13 @@ elseif(NOT APPLE)
                                                                                                                   PATTERN "symstore-venv" EXCLUDE
                                                                                                                   PATTERN "Testing" EXCLUDE
                                                                                                                   PATTERN "tests_output" EXCLUDE
+                                                                                                                  PATTERN "tools" EXCLUDE
+                                                                                                                  PATTERN "dm-import" EXCLUDE
                                                                                                                   PATTERN "try-compile")
         INSTALL(FILES "${INSTALL_SOURCE}/openmw.cfg.install" DESTINATION "." RENAME "openmw.cfg")
         INSTALL(FILES "${OpenMW_SOURCE_DIR}/CHANGELOG.md" DESTINATION "." RENAME "CHANGELOG.txt")
         INSTALL(FILES "${OpenMW_SOURCE_DIR}/README.md" DESTINATION "." RENAME "README.txt")
         INSTALL(FILES "${OpenMW_SOURCE_DIR}/LICENSE" DESTINATION "." RENAME "LICENSE.txt")
-        INSTALL(FILES "${OpenMW_SOURCE_DIR}/AUTHORS.md" DESTINATION "." RENAME "AUTHORS.txt")
         INSTALL(FILES "${INSTALL_SOURCE}/defaults.bin" DESTINATION ".")
         INSTALL(FILES "${INSTALL_SOURCE}/overrides.bin" DESTINATION ".")
         INSTALL(FILES "${INSTALL_SOURCE}/gamecontrollerdb.txt" DESTINATION ".")
@@ -1028,13 +1099,13 @@ elseif(NOT APPLE)
         SET(CPACK_GENERATOR "NSIS")
         SET(CPACK_PACKAGE_EXECUTABLES "openmw_vr;OpenMW VR")
         IF(BUILD_LAUNCHER)
-            SET(CPACK_PACKAGE_EXECUTABLES "${CPACK_PACKAGE_EXECUTABLES};openmw-launcher;OpenMW Launcher")
+            SET(CPACK_PACKAGE_EXECUTABLES "${CPACK_PACKAGE_EXECUTABLES};brutalmorrowind-launcher;Brutal Morrowind Launcher")
         ENDIF(BUILD_LAUNCHER)
         IF(BUILD_OPENCS)
             SET(CPACK_PACKAGE_EXECUTABLES "${CPACK_PACKAGE_EXECUTABLES};openmw-cs;OpenMW Construction Set")
         ENDIF(BUILD_OPENCS)
         IF(BUILD_WIZARD)
-            SET(CPACK_PACKAGE_EXECUTABLES "${CPACK_PACKAGE_EXECUTABLES};openmw-wizard;OpenMW Wizard")
+            SET(CPACK_PACKAGE_EXECUTABLES "${CPACK_PACKAGE_EXECUTABLES};brutalmorrowind-wizard;Brutal Morrowind Wizard")
         ENDIF(BUILD_WIZARD)
         SET(CPACK_NSIS_CREATE_ICONS_EXTRA "CreateShortCut '\$SMPROGRAMS\\\\$STARTMENU_FOLDER\\\\Readme.lnk' '\$INSTDIR\\\\README.txt'")
         SET(CPACK_NSIS_DELETE_ICONS_EXTRA "
@@ -1044,24 +1115,36 @@ elseif(NOT APPLE)
         SET(CPACK_RESOURCE_FILE_README "${OpenMW_SOURCE_DIR}/README.md")
         SET(CPACK_PACKAGE_DESCRIPTION_FILE "${OpenMW_SOURCE_DIR}/README.md")
         SET(CPACK_NSIS_EXECUTABLES_DIRECTORY ".")
-        SET(CPACK_NSIS_DISPLAY_NAME "OpenMW ${OPENMW_VERSION}")
+        SET(CPACK_NSIS_DISPLAY_NAME "Brutal Morrowind ${BRUTAL_VERSION}")
+        SET(CPACK_PACKAGE_INSTALL_DIRECTORY "Brutal Morrowind")
+        SET(CPACK_NSIS_PACKAGE_NAME "Brutal Morrowind ${BRUTAL_VERSION}")
+        SET(CPACK_PACKAGE_INSTALL_REGISTRY_KEY "Brutal Morrowind")
         SET(CPACK_NSIS_HELP_LINK "https:\\\\\\\\www.openmw.org")
         SET(CPACK_NSIS_URL_INFO_ABOUT "https:\\\\\\\\www.openmw.org")
-        SET(CPACK_NSIS_INSTALLED_ICON_NAME "openmw-launcher.exe")
-        SET(CPACK_NSIS_MUI_FINISHPAGE_RUN "openmw-launcher.exe")
+        SET(CPACK_NSIS_INSTALLED_ICON_NAME "brutalmorrowind-launcher.exe")
+        SET(CPACK_NSIS_MUI_FINISHPAGE_RUN "brutalmorrowind-launcher.exe")
         SET(CPACK_NSIS_MUI_ICON "${OpenMW_SOURCE_DIR}/files/windows/openmw.ico")
         SET(CPACK_NSIS_MUI_UNIICON "${OpenMW_SOURCE_DIR}/files/windows/openmw.ico")
         SET(CPACK_PACKAGE_ICON "${OpenMW_SOURCE_DIR}\\\\files\\\\openmw.bmp")
 
-        SET(VCREDIST64 "${OpenMW_BINARY_DIR}/vcredist_x64.exe" CACHE FILEPATH "Path to vcredist_x64.exe")
+        SET(VCREDIST32 "${OpenMW_BINARY_DIR}/vcredist_x86.exe")
+        if(EXISTS ${VCREDIST32})
+            INSTALL(FILES ${VCREDIST32} DESTINATION "redist")
+            SET(CPACK_NSIS_EXTRA_INSTALL_COMMANDS "ExecWait '\\\"$INSTDIR\\\\redist\\\\vcredist_x86.exe\\\" /q /norestart'" )
+        endif(EXISTS ${VCREDIST32})
+
+        SET(VCREDIST64 "${OpenMW_BINARY_DIR}/vcredist_x64.exe")
         if(EXISTS ${VCREDIST64})
             INSTALL(FILES ${VCREDIST64} DESTINATION "redist")
-            get_filename_component(REDIST_FILENAME "${VCREDIST64}" NAME)
-            SET(CPACK_NSIS_EXTRA_INSTALL_COMMANDS "
-                ExecWait '\\\"$INSTDIR\\\\redist\\\\${REDIST_FILENAME}\\\" /q /norestart'
-                RMDir /r \\\"$INSTDIR\\\\redist\\\"
-                ")
+            SET(CPACK_NSIS_EXTRA_INSTALL_COMMANDS "ExecWait '\\\"$INSTDIR\\\\redist\\\\vcredist_x64.exe\\\" /q /norestart'" )
         endif(EXISTS ${VCREDIST64})
+
+        SET(OALREDIST "${OpenMW_BINARY_DIR}/oalinst.exe")
+        if(EXISTS ${OALREDIST})
+            INSTALL(FILES ${OALREDIST} DESTINATION "redist")
+            SET(CPACK_NSIS_EXTRA_INSTALL_COMMANDS "${CPACK_NSIS_EXTRA_INSTALL_COMMANDS}
+                ExecWait '\\\"$INSTDIR\\\\redist\\\\oalinst.exe\\\" /s'" )
+        endif(EXISTS ${OALREDIST})
 
         if(CMAKE_CL_64)
             SET(CPACK_NSIS_INSTALL_ROOT "$PROGRAMFILES64")
@@ -1076,7 +1159,7 @@ elseif(NOT APPLE)
             INSTALL(PROGRAMS "$<TARGET_FILE:openmw>" DESTINATION "${BINDIR}" )
         ENDIF(BUILD_OPENMW)
         IF(BUILD_LAUNCHER)
-            INSTALL(PROGRAMS "${INSTALL_SOURCE}/openmw-launcher" DESTINATION "${BINDIR}" )
+            INSTALL(PROGRAMS "$<TARGET_FILE:openmw-launcher>" DESTINATION "${BINDIR}" )
         ENDIF(BUILD_LAUNCHER)
         IF(BUILD_BSATOOL)
             INSTALL(PROGRAMS "${INSTALL_SOURCE}/bsatool" DESTINATION "${BINDIR}" )
@@ -1088,7 +1171,7 @@ elseif(NOT APPLE)
             INSTALL(PROGRAMS "${INSTALL_SOURCE}/niftest" DESTINATION "${BINDIR}" )
         ENDIF(BUILD_NIFTEST)
         IF(BUILD_MWINIIMPORTER)
-            INSTALL(PROGRAMS "${INSTALL_SOURCE}/openmw-iniimporter" DESTINATION "${BINDIR}" )
+            INSTALL(PROGRAMS "$<TARGET_FILE:openmw-iniimporter>" DESTINATION "${BINDIR}" )
         ENDIF(BUILD_MWINIIMPORTER)
         IF(BUILD_ESSIMPORTER)
             INSTALL(PROGRAMS "${INSTALL_SOURCE}/openmw-essimporter" DESTINATION "${BINDIR}" )
@@ -1097,19 +1180,19 @@ elseif(NOT APPLE)
             INSTALL(PROGRAMS "${INSTALL_SOURCE}/openmw-cs" DESTINATION "${BINDIR}" )
         ENDIF(BUILD_OPENCS)
         IF(BUILD_WIZARD)
-            INSTALL(PROGRAMS "${INSTALL_SOURCE}/openmw-wizard" DESTINATION "${BINDIR}" )
+            INSTALL(PROGRAMS "$<TARGET_FILE:openmw-wizard>" DESTINATION "${BINDIR}" )
         ENDIF(BUILD_WIZARD)
         if(BUILD_NAVMESHTOOL)
-            install(PROGRAMS "${INSTALL_SOURCE}/openmw-navmeshtool" DESTINATION "${BINDIR}" )
+            install(PROGRAMS "$<TARGET_FILE:openmw-navmeshtool>" DESTINATION "${BINDIR}" )
         endif()
-        IF(BUILD_BULLETOBJECTTOOL)
-            INSTALL(PROGRAMS "${INSTALL_SOURCE}/openmw-bulletobjecttool" DESTINATION "${BINDIR}" )
-        ENDIF(BUILD_BULLETOBJECTTOOL)
+        IF(BUILD_PHYSICSOBJECTTOOL)
+            INSTALL(PROGRAMS "${INSTALL_SOURCE}/openmw-physicsobjecttool" DESTINATION "${BINDIR}" )
+        ENDIF(BUILD_PHYSICSOBJECTTOOL)
 
         # Install icon and desktop file
-        INSTALL(FILES "${OpenMW_BINARY_DIR}/org.openmw.launcher.desktop" DESTINATION "${DATAROOTDIR}/applications" COMPONENT "openmw")
-        INSTALL(FILES "${OpenMW_SOURCE_DIR}/files/launcher/images/openmw.png" DESTINATION "${ICONDIR}" COMPONENT "openmw")
-        INSTALL(FILES "${OpenMW_BINARY_DIR}/openmw.appdata.xml" DESTINATION "${DATAROOTDIR}/metainfo" COMPONENT "openmw")
+        INSTALL(FILES "${OpenMW_BINARY_DIR}/brutalmorrowind.desktop" DESTINATION "${DATAROOTDIR}/applications" COMPONENT "openmw")
+        INSTALL(FILES "${OpenMW_SOURCE_DIR}/files/launcher/images/openmw.png" DESTINATION "${ICONDIR}" RENAME "brutalmorrowind.png" COMPONENT "openmw")
+        INSTALL(FILES "${OpenMW_BINARY_DIR}/brutalmorrowind.metainfo.xml" DESTINATION "${DATAROOTDIR}/metainfo" COMPONENT "openmw")
         IF(BUILD_OPENCS)
             INSTALL(FILES "${OpenMW_BINARY_DIR}/org.openmw.cs.desktop" DESTINATION "${DATAROOTDIR}/applications" COMPONENT "opencs")
             INSTALL(FILES "${OpenMW_SOURCE_DIR}/files/opencs/openmw-cs.png" DESTINATION "${ICONDIR}" COMPONENT "opencs")
@@ -1131,17 +1214,12 @@ elseif(NOT APPLE)
     endif(WIN32)
 endif(OPENMW_OSX_DEPLOYMENT AND APPLE)
 
-# what is necessary to build documentation
-if ( BUILD_DOCS )
-    # Builds the documentation.
-    FIND_PACKAGE( Sphinx REQUIRED )
-    FIND_PACKAGE( Doxygen REQUIRED )
-
-    # Doxygen Target -- simply run 'make doc' or 'make doc_pages'
-    # output directory for 'make doc'       is "${OpenMW_BINARY_DIR}/docs/Doxygen"
-    # output directory for 'make doc_pages' is "${DOXYGEN_PAGES_OUTPUT_DIR}" if defined
-    #                                       or "${OpenMW_BINARY_DIR}/docs/Pages" otherwise
-
+# Doxygen Target -- simply run 'make doc' or 'make doc_pages'
+# output directory for 'make doc'       is "${OpenMW_BINARY_DIR}/docs/Doxygen"
+# output directory for 'make doc_pages' is "${DOXYGEN_PAGES_OUTPUT_DIR}" if defined
+#                                       or "${OpenMW_BINARY_DIR}/docs/Pages" otherwise
+find_package(Doxygen)
+if (DOXYGEN_FOUND)
     # determine output directory for doc_pages
     if (NOT DEFINED DOXYGEN_PAGES_OUTPUT_DIR)
         set(DOXYGEN_PAGES_OUTPUT_DIR "${OpenMW_BINARY_DIR}/docs/Pages")

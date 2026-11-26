@@ -1,8 +1,17 @@
+// IMPORTANT: Jolt must be initialized before any Jolt types are used anywhere
+// This includes types like JPH::Ref<> used in headers. We initialize it at the
+// very start of main() before any other code runs.
+#include <Jolt/Jolt.h>
+#include <Jolt/RegisterTypes.h>
+#include <Jolt/Core/Factory.h>
+
 #include <components/debug/debugging.hpp>
 #include <components/fallback/fallback.hpp>
 #include <components/fallback/validate.hpp>
 #include <components/files/configurationmanager.hpp>
+#include <components/files/conversion.hpp>
 #include <components/misc/osgpluginchecker.hpp>
+#include <components/misc/darkmessiahdata.hpp>
 #include <components/misc/rng.hpp>
 #include <components/platform/platform.hpp>
 #include <components/version/version.hpp>
@@ -27,6 +36,7 @@ extern "C" __declspec(dllexport) DWORD AmdPowerXpressRequestHighPerformance = 0x
 #endif
 
 #include <filesystem>
+#include <osgDB/Registry>
 
 #if (defined(__APPLE__) || defined(__linux) || defined(__unix) || defined(__posix))
 #include <unistd.h>
@@ -72,6 +82,10 @@ bool parseOptions(int argc, char** argv, OMW::Engine& engine, Files::Configurati
     Debug::setupLogging(cfgMgr.getLogPath(), "OpenMW");
     Log(Debug::Info) << Version::getOpenmwVersionDescription();
 
+    // Self-heal duplicate content=/groundcover= entries in the user's config files so a stray duplicate never
+    // aborts the game with "Content file specified more than once".
+    cfgMgr.repairUserConfig();
+
     Settings::Manager::load(cfgMgr);
 
     MWGui::DebugWindow::startLogRecording();
@@ -84,6 +98,20 @@ bool parseOptions(int argc, char** argv, OMW::Engine& engine, Files::Configurati
     engine.setEncoding(ToUTF8::calculateEncoding(encoding));
 
     Files::PathContainer dataDirs(asPathContainer(variables["data"].as<Files::MaybeQuotedPathContainer>()));
+
+    // Dark Messiah data from brutalmorrowind-import, above the configured data
+    // and below data-local. Without it the game keeps Morrowind's animations.
+    const std::filesystem::path& userData = cfgMgr.getUserDataPath();
+    if (Misc::DarkMessiahData::isReady(userData))
+    {
+        const std::filesystem::path root = Misc::DarkMessiahData::root(userData);
+        Log(Debug::Info) << "Using Dark Messiah data from " << root;
+        for (std::string_view part : Misc::DarkMessiahData::sParts)
+            dataDirs.push_back(root / part);
+    }
+    else
+        Log(Debug::Info) << "No Dark Messiah data for recipe " << Misc::DarkMessiahData::sRecipe << " in "
+                         << Misc::DarkMessiahData::root(userData) << "; playing with Morrowind animations";
 
     Files::PathContainer::value_type local(variables["data-local"]
                                                .as<Files::MaybeQuotedPathContainer::value_type>()
@@ -114,18 +142,18 @@ bool parseOptions(int argc, char** argv, OMW::Engine& engine, Files::Configurati
         return false;
     }
     engine.addContentFile("builtin.omwscripts");
+    // Self-heal: skip duplicate content entries (keeping first occurrence / load order) instead of aborting.
+    // The user config file itself is repaired separately (see ConfigurationManager::repairUserConfig), but this
+    // guards the in-memory list too so a duplicate never aborts startup.
     std::set<std::string> contentDedupe{ "builtin.omwscripts" };
-    for (const auto& contentFile : content)
-    {
-        if (!contentDedupe.insert(contentFile).second)
-        {
-            Log(Debug::Error) << "Content file specified more than once: " << contentFile << ". Aborting...";
-            return false;
-        }
-    }
-
     for (auto& file : content)
     {
+        if (!contentDedupe.insert(file).second)
+        {
+            Log(Debug::Warning) << "Content file specified more than once: " << file
+                                << ". Ignoring the duplicate.";
+            continue;
+        }
         engine.addContentFile(file);
     }
 
@@ -241,6 +269,14 @@ int runApplication(int argc, char* argv[])
 
     if (parseOptions(argc, argv, *engine, cfgMgr))
     {
+#if defined(__linux__) && !defined(ANDROID)
+        const auto bundledLibraries = cfgMgr.getLocalPath() / "lib";
+        if (std::filesystem::is_directory(bundledLibraries))
+        {
+            auto& paths = osgDB::Registry::instance()->getLibraryFilePathList();
+            paths.insert(paths.begin(), Files::pathToUnicodeString(bundledLibraries));
+        }
+#endif
         if (!Misc::checkRequiredOSGPluginsArePresent())
             return 1;
 
@@ -256,7 +292,21 @@ extern "C" int SDL_main(int argc, char** argv)
 int main(int argc, char** argv)
 #endif
 {
-    return Debug::wrapApplication(&runApplication, argc, argv, "OpenMW");
+    // Initialize Jolt Physics FIRST before any Jolt types are used
+    // This must happen before any code that might use JPH::Ref<> or other Jolt types
+    JPH::RegisterDefaultAllocator();
+    JPH::Factory::sInstance = new JPH::Factory();
+    JPH::RegisterTypes();
+
+    int result = Debug::wrapApplication(&runApplication, argc, argv, "OpenMW");
+
+    // Clean up Jolt global state after all other cleanup is complete
+    // This must happen AFTER the Engine is destroyed to avoid use-after-free
+    JPH::UnregisterTypes();
+    delete JPH::Factory::sInstance;
+    JPH::Factory::sInstance = nullptr;
+
+    return result;
 }
 
 // Platform specific for Windows when there is no console built into the executable.

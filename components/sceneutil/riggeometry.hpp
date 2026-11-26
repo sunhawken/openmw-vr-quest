@@ -1,10 +1,19 @@
 #ifndef OPENMW_COMPONENTS_NIFOSG_RIGGEOMETRY_H
 #define OPENMW_COMPONENTS_NIFOSG_RIGGEOMETRY_H
 
+#include "surfacedecals.hpp"
+
 #include <osg/Geometry>
 #include <osg/Matrixf>
+#include <osg/Vec3d>
 
+#include <cstddef>
+#include <string>
 #include <string_view>
+#include <vector>
+#include <functional>
+#include <map>
+#include <optional>
 
 namespace SceneUtil
 {
@@ -48,6 +57,27 @@ namespace SceneUtil
         using BoneWeight = std::pair<size_t, float>;
         using BoneWeights = std::vector<BoneWeight>;
 
+        struct BonePoseOverride
+        {
+            std::string anchor;
+            osg::Matrixf relative;
+            Bone* anchorNode = nullptr;
+        };
+        using BonePoseOverrides = std::map<std::string, BonePoseOverride>;
+        void setBonePoseOverrides(BonePoseOverrides overrides);
+        void clearBonePoseOverrides();
+        std::vector<std::string> getInfluencingBoneNames() const;
+        std::vector<unsigned short> getVerticesInfluencedBy(std::string_view bone) const;
+
+        // Distal extent in the named bone's bind coordinates, for matching a garment cuff.
+        std::optional<float> getBoneLocalMaxX(std::string_view bone) const;
+
+        // Per-instance sleeve fitting, for a loose garment worn by the first-person arms: pull
+        // vertices toward the length of each named bone (its local X axis) by that bone's factor.
+        void slimAroundBones(const std::map<std::string, float, std::less<>>& factors);
+        // Drop the triangles wholly owned by these bones, for a body whose arms another model draws.
+        void removeTrianglesOfBones(const std::vector<std::string>& bones);
+
         void setBoneInfo(std::vector<BoneInfo>&& bones);
         // Convert influences in bone and weight list per vertex format
         void setInfluences(const std::vector<BoneWeights>& influences);
@@ -61,6 +91,46 @@ namespace SceneUtil
         void setRootBone(std::string_view name);
 
         osg::ref_ptr<osg::Geometry> getSourceGeometry() const;
+
+        /// Names of the bones that influence this geometry (empty if not yet initialized).
+        /// Used to classify a mesh as jiggle-driven vs. rigid for the seam welder.
+        std::vector<std::string> getInfluenceBoneNames() const;
+
+        /// The bone table (name / bind / bounds) this geometry skins against. Empty if unset.
+        std::vector<BoneInfo> getBoneInfoList() const;
+
+        /// Per-vertex bone weights (indices into the bone table), expanded from the internal
+        /// grouped representation. Vertices with no influence get an empty list.
+        std::vector<BoneWeights> getPerVertexInfluences(std::size_t vertexCount) const;
+
+        /// Forget the resolved skeleton/bone pointers so they are re-resolved from the current
+        /// bone table on the next cull. Call after mutating the bone table / influences (e.g.
+        /// the seam welder transplanting jiggle weights) on a geometry that may already be live.
+        void reinitialize();
+
+        /// Gives this geometry its own copy of the influence data. Copies of a RigGeometry share
+        /// that data with the cached template, so call this before changing bones or weights on
+        /// one instance; otherwise every actor wearing the same mesh gets the change.
+        void makeInfluenceDataUnique();
+
+        /// Jiggle seam fix: feather this mesh's jiggle-bone (breast/butt) influence weights to
+        /// zero within @p distance (world units) of the mesh's open-edge (seam) boundary, and
+        /// renormalize each affected vertex back to 1.0 via its other bones. This pins the seam-ring
+        /// vertices so they stay coincident with the neighbouring body-part/clothing piece when the
+        /// jiggle bone moves, closing the crack while keeping the jiggle in the mesh interior.
+        /// Called once at load, before skinning, so it is cheap and free of runtime/thread hazards.
+        void applyJiggleSeamFeather(float distance);
+        SurfaceDecals* getOrCreateSurfaceDecals();
+        const SurfaceDecals* getSurfaceDecals() const { return mSurfaceDecals.get(); }
+        SurfaceDecals* getSurfaceDecals() { return mSurfaceDecals.get(); }
+
+        // Instance-only CPU snapshot at the supplied current pose; never reads the previous cull buffer.
+        // positionsOnly returns just a fresh vertex array, avoiding material/image copies for per-frame sampling.
+        // With referenceOrigin, both boneWorld and the returned positions use world axes relative to that origin.
+        // Scene-path translations are rebased in double precision before converting to skinning's float matrices.
+        osg::ref_ptr<osg::Geometry> snapshotWorldGeometry(const osg::NodePath& path,
+            const std::function<std::optional<osg::Matrixf>(std::string_view)>& boneWorld, bool positionsOnly = false,
+            bool dynamicArraysOnly = false, const std::optional<osg::Vec3d>& referenceOrigin = {});
 
         void accept(osg::NodeVisitor& nv) override;
         bool supports(const osg::PrimitiveFunctor&) const override { return true; }
@@ -85,9 +155,10 @@ namespace SceneUtil
         void updateBounds(osg::NodeVisitor* nv);
 
         osg::ref_ptr<osg::Geometry> mGeometry[2];
-        osg::Geometry* getGeometry(unsigned int frame) const;
 
         osg::ref_ptr<osg::Geometry> mSourceGeometry;
+        // Copy construction deliberately starts with no instance decals.
+        osg::ref_ptr<SurfaceDecals> mSurfaceDecals;
         osg::ref_ptr<const osg::Vec4Array> mSourceTangents;
         Skeleton* mSkeleton{ nullptr };
 
@@ -103,8 +174,13 @@ namespace SceneUtil
         };
         osg::ref_ptr<InfluenceData> mData;
         std::vector<Bone*> mNodes;
+        BonePoseOverrides mBonePoseOverrides; // Owned by this instance; mData remains shared and immutable.
+        osg::Matrixf getBoneMatrix(std::size_t index) const;
 
         unsigned int mLastFrameNumber{ 0 };
+        // Buffer holding the latest skinning result. New results always go to the other buffer, so the one the
+        // draw thread may still be reading from the previous frame is never overwritten.
+        unsigned int mCurrentBuffer{ 0 };
         bool mBoundsFirstFrame{ true };
 
         bool initFromParentSkeleton(osg::NodeVisitor* nv);

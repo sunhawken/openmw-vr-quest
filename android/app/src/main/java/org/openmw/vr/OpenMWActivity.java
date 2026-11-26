@@ -111,6 +111,51 @@ public class OpenMWActivity extends SDLActivity {
         super.loadLibraries();
     }
 
+
+    /**
+     * Dark Messiah data built by the desktop importer. The engine reads it from the user-data directory
+     * (dm-assets/<recipe>/); that directory is app-private on the headset, so adb cannot fill it. Stage the
+     * import at /sdcard/Morrowind/dm-assets/<recipe>/ and it is copied in here when missing.
+     */
+    private void syncDarkMessiahData() {
+        try {
+            File base = new File(Environment.getExternalStorageDirectory(), "Morrowind/dm-assets");
+            File[] recipes = base.listFiles();
+            if (recipes == null)
+                return;
+            for (File recipe : recipes) {
+                File marker = new File(recipe, "dm-import-ready.json");
+                File dst = new File(new File(userStorage, "dm-assets"), recipe.getName());
+                if (!marker.isFile() || new File(dst, "dm-import-ready.json").isFile())
+                    continue;
+                Log.i("OpenMW", "Copying Dark Messiah data " + recipe + " -> " + dst);
+                copyTree(recipe, dst);
+                copyTree(marker, new File(dst, "dm-import-ready.json"));
+            }
+        } catch (Exception e) {
+            Log.w("OpenMW", "Dark Messiah data sync failed: " + e);
+        }
+    }
+
+    private void copyTree(File src, File dst) throws Exception {
+        if (src.isDirectory()) {
+            dst.mkdirs();
+            File[] kids = src.listFiles();
+            if (kids != null)
+                for (File k : kids)
+                    if (!k.getName().equals("dm-import-ready.json"))
+                        copyTree(k, new File(dst, k.getName()));
+            return;
+        }
+        dst.getParentFile().mkdirs();
+        try (InputStream in = new java.io.FileInputStream(src); OutputStream out = new FileOutputStream(dst)) {
+            byte[] buf = new byte[1 << 16];
+            int n;
+            while ((n = in.read(buf)) > 0)
+                out.write(buf, 0, n);
+        }
+    }
+
     private File globalConfigDir() { return new File(getFilesDir(), "config"); }
     private File resourcesDir()    { return new File(getFilesDir(), "resources"); }
 
@@ -175,6 +220,7 @@ public class OpenMWActivity extends SDLActivity {
         writeFile(new File(globalConfigDir(), "openmw.cfg"), global.toString());
 
         // User config: every existing data dir + the game files found across them.
+        syncDarkMessiahData();
         File userCfgDir = new File(userStorage, "config");
         userCfgDir.mkdirs();
         new File(userStorage, "data").mkdirs(); // ensure the app-scoped fallback exists
@@ -187,6 +233,20 @@ public class OpenMWActivity extends SDLActivity {
                 present.add(d);
             }
         }
+        // An explicit load order staged next to the data (generated from the desktop openmw.cfg) wins:
+        // /sdcard/Morrowind/content-list.txt (+ archive-list.txt, groundcover-list.txt, fallback.cfg).
+        File listDir = new File(Environment.getExternalStorageDirectory(), "Morrowind");
+        java.util.List<String> contentList = readList(new File(listDir, "content-list.txt"));
+        if (!contentList.isEmpty()) {
+            for (String bsa : readList(new File(listDir, "archive-list.txt")))
+                sb.append("fallback-archive=").append(bsa).append('\n');
+            for (String c : contentList)
+                sb.append("content=").append(c).append('\n');
+            for (String g : readList(new File(listDir, "groundcover-list.txt")))
+                sb.append("groundcover=").append(g).append('\n');
+            for (String f : readList(new File(listDir, "fallback.cfg")))
+                sb.append(f).append('\n');
+        } else {
         // BSA archives hold Morrowind's meshes/textures/UI assets; without fallback-archive=
         // entries the world renders black. Register every .bsa found (base game first).
         for (String bsa : detect(present, new String[] { ".bsa" },
@@ -195,6 +255,7 @@ public class OpenMWActivity extends SDLActivity {
         for (String esm : detect(present, new String[] { ".esm", ".omwgame", ".esp", ".omwaddon" },
                 new String[] { "Morrowind.esm", "Tribunal.esm", "Bloodmoon.esm" }))
             sb.append("content=").append(esm).append('\n');
+        }
         writeFile(new File(userCfgDir, "openmw.cfg"), sb.toString());
         Log.i(TAG, "openmw.cfg data dirs: " + present);
 
@@ -207,6 +268,22 @@ public class OpenMWActivity extends SDLActivity {
         if (!existing.contains("[Fog]"))
             writeFile(userSettings,
                     existing + "\n[Fog]\nradial fog = true\nsky blending = true\n");
+    }
+
+    private java.util.List<String> readList(File f) {
+        java.util.ArrayList<String> out = new java.util.ArrayList<>();
+        try {
+            if (!f.isFile())
+                return out;
+            for (String line : readFile(f).split("\n")) {
+                String s = line.replace("\r", "").trim();
+                if (!s.isEmpty())
+                    out.add(s);
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "could not read " + f + ": " + e);
+        }
+        return out;
     }
 
     /** Files with any of the given extensions across all data dirs, deduped, known names first. */

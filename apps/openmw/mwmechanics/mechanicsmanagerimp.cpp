@@ -14,6 +14,7 @@
 #include <components/esm3/stolenitems.hpp>
 
 #include <components/sceneutil/positionattitudetransform.hpp>
+#include <components/settings/values.hpp>
 
 #include "../mwworld/class.hpp"
 #include "../mwworld/esmstore.hpp"
@@ -752,6 +753,31 @@ namespace MWMechanics
                 tempChange = -currentDisposition;
             permChange = int(tempChange / fPerTempMult);
         }
+    }
+
+    bool MechanicsManager::requestSwordClinch(const MWWorld::Ptr& player, const MWWorld::Ptr& opponent)
+    {
+        return mActors.requestSwordClinch(player, opponent);
+    }
+
+    void MechanicsManager::swordClinchInput(bool pressed)
+    {
+        mActors.swordClinchInput(pressed);
+    }
+
+    void MechanicsManager::cancelSwordClinch(const MWWorld::Ptr& participant, std::string_view reason)
+    {
+        mActors.cancelSwordClinch(participant, reason);
+    }
+
+    bool MechanicsManager::staggerActor(const MWWorld::Ptr& ptr, std::string_view group)
+    {
+        return ptr.getClass().isActor() && mActors.staggerActor(ptr, group);
+    }
+
+    void MechanicsManager::cancelPlayerAttackForKick()
+    {
+        mActors.cancelPlayerAttackForKick(getPlayer());
     }
 
     void MechanicsManager::forceStateUpdate(const MWWorld::Ptr& ptr)

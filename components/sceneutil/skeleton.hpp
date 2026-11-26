@@ -2,6 +2,7 @@
 #define OPENMW_COMPONENTS_NIFOSG_SKELETON_H
 
 #include <osg/Group>
+#include <osg/observer_ptr>
 
 #include <memory>
 #include <unordered_map>
@@ -18,7 +19,9 @@ namespace SceneUtil
 
         osg::Matrixf mMatrixInSkeletonSpace;
 
-        osg::MatrixTransform* mNode;
+        // Observed (weak) so it nulls out if the bone's node is freed while this Bone lingers in the
+        // hierarchy, rather than dangling - update() skips it instead of crashing on a freed node.
+        osg::observer_ptr<osg::MatrixTransform> mNode;
 
         std::vector<std::unique_ptr<Bone>> mChildren;
 
@@ -59,6 +62,13 @@ namespace SceneUtil
 
         bool getActive() const;
 
+        /// True when the update traversal skipped this skeleton in the given frame, so its pose has not changed and
+        /// child rigs can reuse their last skinning result.
+        bool isPoseFrozen(unsigned int traversalNumber) const { return mUpdateSkippedFrame == traversalNumber; }
+
+        /// Semi-active skeletons farther than this from the camera update at a reduced rate. 0 disables.
+        static void setUpdateLodDistance(float distance);
+
         void traverse(osg::NodeVisitor& nv) override;
 
         void markDirty();
@@ -90,6 +100,10 @@ namespace SceneUtil
 
         unsigned int mLastFrameNumber;
         unsigned int mLastCullFrameNumber;
+        unsigned int mUpdateSkippedFrame = 0;
+        float mLastCullDistance = 0.f;
+
+        static float sUpdateLodDistance;
     };
 
 }

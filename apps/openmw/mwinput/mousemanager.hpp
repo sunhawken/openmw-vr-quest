@@ -41,6 +41,11 @@ namespace MWInput
         int getMouseMoveY() const { return mMouseMoveY; }
         int getMouseWheel() const { return mMouseWheel; }
 
+        // Recent, time-decayed mouse/camera "flick" direction in screen pixels.
+        // x: right positive, y: down positive. Used for directional melee attacks.
+        float getFlickX() const { return mFlickX; }
+        float getFlickY() const { return mFlickY; }
+
     private:
         BindingsManager* mBindingsManager;
         SDLUtil::InputWrapper* mInputWrapper;
@@ -55,6 +60,9 @@ namespace MWInput
 
         int mMouseMoveX;
         int mMouseMoveY;
+
+        float mFlickX;
+        float mFlickY;
 //## VR_PATCH BEGIN
     public:
         // void mouseMovedVR(const SDLUtil::MouseMotionEvent& arg);

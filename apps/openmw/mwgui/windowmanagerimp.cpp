@@ -1,3 +1,4 @@
+#include <components/sdlutil/windowcoordinates.hpp>
 #include "windowmanagerimp.hpp"
 
 #include <algorithm>
@@ -15,9 +16,6 @@
 #include <MyGUI_LayerManager.h>
 #include <MyGUI_PointerManager.h>
 #include <MyGUI_UString.h>
-
-// For BT_NO_PROFILE
-#include <LinearMath/btQuickprof.h>
 
 #include <SDL_clipboard.h>
 #include <SDL_keyboard.h>
@@ -223,7 +221,7 @@ namespace MWGui
         int dw, dh;
         SDL_GL_GetDrawableSize(window, &dw, &dh);
 
-        mScalingFactor = Settings::gui().mScalingFactor * (dw / w);
+        mScalingFactor = Settings::gui().mScalingFactor * SDLUtil::drawableScale(w, dw);
         constexpr VFS::Path::NormalizedView resourcePath("mygui");
         mGuiPlatform = std::make_unique<MyGUIPlatform::Platform>(viewer, guiRoot, resourceSystem->getImageManager(),
             resourceSystem->getVFS(), mScalingFactor, resourcePath, logpath / "MyGUI.log");
@@ -392,6 +390,7 @@ namespace MWGui
         mWindows.push_back(std::move(spellWindow));
         trackWindow(mSpellWindow, makeSpellsWindowSettingValues());
 
+        // (Head and hair are changed in Options > Appearance, see AppearanceTab.)
         mGuiModeStates[GM_Inventory] = GuiModeState({ mMap, mInventoryWindow, mSpellWindow, mStatsWindow });
         mGuiModeStates[GM_None] = GuiModeState({ mMap, mInventoryWindow, mSpellWindow, mStatsWindow });
 
@@ -456,7 +455,7 @@ namespace MWGui
         mCountDialog = countDialog.get();
         mWindows.push_back(std::move(countDialog));
 
-        auto settingsWindow = std::make_unique<SettingsWindow>(mCfgMgr);
+        auto settingsWindow = std::make_unique<SettingsWindow>(mCfgMgr, mViewer->getSceneData()->asGroup(), mResourceSystem);
         mSettingsWindow = settingsWindow.get();
         mWindows.push_back(std::move(settingsWindow));
         trackWindow(mSettingsWindow, makeSettingsWindowSettingValues());
@@ -1160,7 +1159,8 @@ namespace MWGui
             = MWBase::Environment::get().getLuaManager()->getActorControls(player);
         bool triedToMove = playerControls
             && (playerControls->mMovement != 0 || playerControls->mSideMovement != 0 || playerControls->mJump);
-        if (mMessageBoxManager && triedToMove && playerCls.getEncumbrance(player) > playerCls.getCapacity(player))
+        if (!Settings::game().mKineticPlayerMovement && mMessageBoxManager && triedToMove
+            && playerCls.getEncumbrance(player) > playerCls.getCapacity(player))
         {
             const auto& msgboxs = mMessageBoxManager->getActiveMessageBoxes();
             auto it
@@ -2234,6 +2234,9 @@ namespace MWGui
         setKeyFocusWidget(mVideoWidget);
 
         mVideoBackground->setVisible(true);
+
+        if (mInputBlocker)
+            mInputBlocker->setVisible(false);
 
 //## VR_PATCH BEGIN
         if(VR::getVR())

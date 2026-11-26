@@ -1,9 +1,16 @@
 #include "movementsolver.hpp"
+#include "playerkinetics.hpp"
 
-#include <BulletCollision/CollisionDispatch/btCollisionObject.h>
-#include <BulletCollision/CollisionDispatch/btCollisionWorld.h>
-#include <BulletCollision/CollisionShapes/btConvexShape.h>
+#include <Jolt/Jolt.h>
+#include <Jolt/Physics/Body/BodyFilter.h>
+#include <Jolt/Physics/Collision/CastResult.h>
+#include <Jolt/Physics/Collision/CollisionCollectorImpl.h>
+#include <Jolt/Physics/Collision/CollisionDispatch.h>
+#include <Jolt/Physics/Collision/RayCast.h>
+#include <Jolt/Physics/Collision/ShapeCast.h>
+#include <Jolt/Physics/Collision/ShapeFilter.h>
 
+#include <components/debug/debuglog.hpp>
 #include <components/esm3/loadgmst.hpp>
 #include <components/misc/convert.hpp>
 
@@ -12,13 +19,13 @@
 #include "../mwworld/esmstore.hpp"
 
 #include "actor.hpp"
-#include "collisiontype.hpp"
 #include "constants.hpp"
-#include "contacttestwrapper.h"
+#include "dynamicobject.hpp"
+#include "joltfilters.hpp"
+#include "joltlayers.hpp"
 #include "object.hpp"
 #include "physicssystem.hpp"
 #include "projectile.hpp"
-#include "projectileconvexcallback.hpp"
 #include "stepper.hpp"
 #include "trace.h"
 
@@ -26,72 +33,136 @@
 
 namespace MWPhysics
 {
-    static bool isActor(const btCollisionObject* obj)
+    static bool isDynamicObjectLayer(JPH::ObjectLayer layer)
     {
-        assert(obj);
-        return obj->getBroadphaseHandle()->m_collisionFilterGroup == CollisionType_Actor;
+        return layer == Layers::DYNAMIC_WORLD;
+    }
+
+    // Push a dynamic object when an actor collides with it
+    // Uses BodyID for thread-safe access - the body may have been removed between trace and this call
+    static void pushDynamicObject(JPH::BodyID hitBodyID, JPH::ObjectLayer hitLayer, const osg::Vec3f& velocity,
+        float actorMass, const JPH::PhysicsSystem* physicsSystem)
+    {
+        if (hitBodyID.IsInvalid() || !isDynamicObjectLayer(hitLayer))
+            return;
+
+        // Use a body lock to safely access the body and its user data
+        // This ensures the body is still valid in the physics system
+        // If the body was removed, the lock will fail safely
+        JPH::BodyLockRead lock(physicsSystem->GetBodyLockInterface(), hitBodyID);
+        if (!lock.Succeeded())
+            return;  // Body was removed, safely abort
+
+        const JPH::Body& body = lock.GetBody();
+
+        // Verify it's still a dynamic object (layer could have changed)
+        if (body.GetObjectLayer() != Layers::DYNAMIC_WORLD)
+            return;
+
+        // Safety check: ensure UserData is valid before casting
+        uintptr_t userData = body.GetUserData();
+        if (userData == 0)
+            return;
+
+        // The UserData is a DynamicObject* since we verified the layer is DYNAMIC_WORLD
+        DynamicObject* dynObj = reinterpret_cast<DynamicObject*>(userData);
+        if (!dynObj)
+            return;
+
+        // Calculate impulse based on actor velocity and mass
+        // Use a fraction of the velocity to avoid overly strong pushes
+        constexpr float pushStrength = 0.5f; // How much of the actor's momentum to transfer
+        constexpr float minImpulse = 50.0f;  // Minimum impulse to apply
+        constexpr float maxImpulse = 500.0f; // Maximum impulse to prevent extreme physics
+
+        osg::Vec3f impulse = velocity * actorMass * pushStrength;
+        float impulseMagnitude = impulse.length();
+
+        if (impulseMagnitude < minImpulse && impulseMagnitude > 0.01f)
+        {
+            // Scale up to minimum impulse
+            impulse = impulse * (minImpulse / impulseMagnitude);
+        }
+        else if (impulseMagnitude > maxImpulse)
+        {
+            // Clamp to maximum impulse
+            impulse = impulse * (maxImpulse / impulseMagnitude);
+        }
+
+        if (impulse.length2() > 0.01f)
+        {
+            // Release lock before calling applyImpulse as it will acquire its own lock
+            lock.ReleaseLock();
+            dynObj->applyImpulse(impulse);
+        }
     }
 
     namespace
     {
-        class ContactCollectionCallback : public btCollisionWorld::ContactResultCallback
+        // Collector that checks if there is anything in the way while switching to inShape
+        bool isSlidingDownhill(const osg::Vec3f& velocity, const osg::Vec3f& normal)
+        {
+            const float speed = std::hypot(velocity.x(), velocity.y());
+            return speed > 5.f && isWalkableSlope(normal)
+                && velocity.x() * normal.x() + velocity.y() * normal.y() > .01f * normal.z() * speed;
+        }
+
+        class ContactCollectionCallback : public JPH::CollideShapeCollector
         {
         public:
-            explicit ContactCollectionCallback(const btCollisionObject& me, const osg::Vec3f& velocity)
-                : mVelocity(Misc::Convert::toBullet(velocity))
+            explicit ContactCollectionCallback(const osg::Vec3f& velocity)
+                : mVelocity(Misc::Convert::toJolt<JPH::Vec3>(velocity))
             {
-                m_collisionFilterGroup = me.getBroadphaseHandle()->m_collisionFilterGroup;
-                m_collisionFilterMask = me.getBroadphaseHandle()->m_collisionFilterMask & ~CollisionType_Projectile;
             }
 
-            btScalar addSingleResult(btManifoldPoint& contact, const btCollisionObjectWrapper* colObj0Wrap,
-                int /*partId0*/, int /*index0*/, const btCollisionObjectWrapper* colObj1Wrap, int /*partId1*/,
-                int /*index1*/) override
+            virtual void AddHit(const JPH::CollideShapeResult& inResult) override
             {
-                if (isActor(colObj0Wrap->getCollisionObject()) && isActor(colObj1Wrap->getCollisionObject()))
-                    return 0.0;
                 // ignore overlap if we're moving in the same direction as it would push us out (don't change this to
                 // >=, that would break detection when not moving)
-                if (contact.m_normalWorldOnB.dot(mVelocity) > 0.0)
-                    return 0.0;
-                auto delta = contact.m_normalWorldOnB * -contact.m_distance1;
+                JPH::Vec3 worldSpaceNormal = -inResult.mPenetrationAxis.Normalized();
+                if (worldSpaceNormal.Dot(mVelocity) > 0.0)
+                    return;
+
+                auto delta = worldSpaceNormal * inResult.mPenetrationDepth;
                 mContactSum += delta;
-                mMaxX = std::max(std::abs(delta.x()), mMaxX);
-                mMaxY = std::max(std::abs(delta.y()), mMaxY);
-                mMaxZ = std::max(std::abs(delta.z()), mMaxZ);
-                if (contact.m_distance1 < mDistance)
+                mMaxX = std::max(std::abs(delta.GetX()), mMaxX);
+                mMaxY = std::max(std::abs(delta.GetY()), mMaxY);
+                mMaxZ = std::max(std::abs(delta.GetZ()), mMaxZ);
+                if (-inResult.mPenetrationDepth < mDistance)
                 {
-                    mDistance = contact.m_distance1;
-                    mNormal = contact.m_normalWorldOnB;
+                    mDistance = -inResult.mPenetrationDepth;
+                    mNormal = worldSpaceNormal;
                     mDelta = delta;
-                    return mDistance;
                 }
-                else
+
+                float early_out = inResult.GetEarlyOutFraction();
+                if (early_out < GetEarlyOutFraction())
                 {
-                    return 0.0;
+                    // Update early out fraction to this hit
+                    UpdateEarlyOutFraction(early_out);
                 }
             }
 
-            btScalar mMaxX = 0.0;
-            btScalar mMaxY = 0.0;
-            btScalar mMaxZ = 0.0;
-            btVector3 mContactSum{ 0.0, 0.0, 0.0 };
-            btVector3 mNormal{ 0.0, 0.0, 0.0 }; // points towards "me"
-            btVector3 mDelta{ 0.0, 0.0, 0.0 }; // points towards "me"
-            btScalar mDistance = 0.0; // negative or zero
+            float mMaxX = 0.0;
+            float mMaxY = 0.0;
+            float mMaxZ = 0.0;
+            JPH::Vec3 mContactSum{ 0.0, 0.0, 0.0 };
+            JPH::Vec3 mNormal{ 0.0, 0.0, 0.0 }; // points towards "me"
+            JPH::Vec3 mDelta{ 0.0, 0.0, 0.0 }; // points towards "me"
+            float mDistance = 0.0; // negative or zero
 
         protected:
-            btVector3 mVelocity;
+            JPH::Vec3 mVelocity;
         };
     }
 
     osg::Vec3f MovementSolver::traceDown(const MWWorld::Ptr& ptr, const osg::Vec3f& position, Actor* actor,
-        btCollisionWorld* collisionWorld, float maxHeight)
+        JPH::PhysicsSystem* physicsSystem, float maxHeight)
     {
         osg::Vec3f offset = actor->getCollisionObjectPosition() - ptr.getRefData().getPosition().asVec3();
 
         ActorTracer tracer;
-        tracer.findGround(actor, position + offset, position + offset - osg::Vec3f(0, 0, maxHeight), collisionWorld);
+        tracer.findGround(actor, position + offset, position + offset - osg::Vec3f(0, 0, maxHeight), physicsSystem);
         if (tracer.mFraction >= 1.0f)
         {
             actor->setOnGround(false);
@@ -103,21 +174,64 @@ namespace MWPhysics
         // Check if we actually found a valid spawn point (use an infinitely thin ray this time).
         // Required for some broken door destinations in Morrowind.esm, where the spawn point
         // intersects with other geometry if the actor's base is taken into account
-        btVector3 from = Misc::Convert::toBullet(position);
-        btVector3 to = from - btVector3(0, 0, maxHeight);
+        JPH::RVec3 rayOrigin = Misc::Convert::toJolt<JPH::RVec3>(position);
+        JPH::RRayCast ray(rayOrigin, JPH::Vec3(0.0f, 0.0f, -maxHeight));
 
-        btCollisionWorld::ClosestRayResultCallback resultCallback1(from, to);
-        resultCallback1.m_collisionFilterGroup = CollisionType_AnyPhysical;
-        resultCallback1.m_collisionFilterMask = CollisionType_World | CollisionType_HeightMap;
+        MultiBroadPhaseLayerFilter broadphaseLayerFilter({ BroadPhaseLayers::WORLD });
+        MultiObjectLayerFilter objectLayerFilter({ Layers::WORLD, Layers::HEIGHTMAP });
 
-        collisionWorld->rayTest(from, to, resultCallback1);
+        // It is important to ignore backfaces for this check, as all actor collision should
+        JPH::RayCastSettings settings;
+        settings.SetBackFaceMode(JPH::EBackFaceMode::IgnoreBackFaces);
 
-        if (resultCallback1.hasHit()
-            && ((Misc::Convert::toOsg(resultCallback1.m_hitPointWorld) - tracer.mEndPos + offset).length2() > 35 * 35
-                || !isWalkableSlope(tracer.mPlaneNormal)))
+        // Cast ray and return closest hit. Jolt's CastRay reports hits to the collector in
+        // broadphase-traversal order, not sorted by distance - taking the first hit
+        // unconditionally (as this used to do) could return an arbitrary, possibly far-below
+        // hit (e.g. a floor several bodies down, or the sea floor under a dock), which is what
+        // caused actors reset via `resetactors`/`ra` and players teleported through doors to
+        // end up placed far below the intended surface. Comparing against the current best
+        // fraction and calling UpdateEarlyOutFraction (matching ContactCollectionCallback
+        // above) makes this a genuine closest-hit collector, like Bullet's
+        // ClosestRayResultCallback that this replaced.
+        class TraceHitCollector : public JPH::CastRayCollector
         {
-            actor->setOnSlope(!isWalkableSlope(resultCallback1.m_hitNormalWorld));
-            return Misc::Convert::toOsg(resultCallback1.m_hitPointWorld) + osg::Vec3f(0.f, 0.f, sGroundOffset);
+        public:
+            virtual void AddHit(const JPH::RayCastResult& inResult) override
+            {
+                if (inResult.mFraction >= mFraction)
+                    return;
+                mFraction = inResult.mFraction;
+                mSubShapeID2 = inResult.mSubShapeID2;
+                mBodyID = inResult.mBodyID;
+                mHit = true;
+                UpdateEarlyOutFraction(mFraction);
+            }
+
+            bool mHit = false;
+            float mFraction = 1.0f;
+            JPH::BodyID mBodyID;
+            JPH::SubShapeID mSubShapeID2;
+        };
+
+        TraceHitCollector collector;
+        physicsSystem->GetNarrowPhaseQuery().CastRay(
+            ray, settings, collector, broadphaseLayerFilter, objectLayerFilter);
+
+        if (collector.mHit)
+        {
+            JPH::RVec3 hitPointWorld = ray.GetPointOnRay(collector.mFraction);
+            if (((Misc::Convert::toOsg(hitPointWorld) - tracer.mEndPos + offset).length2() > 35 * 35
+                    || !isWalkableSlope(tracer.mPlaneNormal)))
+            {
+                JPH::BodyLockRead lock(physicsSystem->GetBodyLockInterface(), collector.mBodyID);
+                if (lock.Succeeded())
+                {
+                    const JPH::Body& hitBody = lock.GetBody();
+                    const JPH::Vec3 normal = hitBody.GetWorldSpaceSurfaceNormal(collector.mSubShapeID2, hitPointWorld);
+                    actor->setOnSlope(!isWalkableSlope(Misc::Convert::toOsg(normal)));
+                    return Misc::Convert::toOsg(hitPointWorld) + osg::Vec3f(0.f, 0.f, sGroundOffset);
+                }
+            }
         }
 
         actor->setOnSlope(!isWalkableSlope(tracer.mPlaneNormal));
@@ -126,8 +240,10 @@ namespace MWPhysics
     }
 
     void MovementSolver::move(
-        ActorFrameData& actor, float time, const btCollisionWorld* collisionWorld, const WorldFrameData& worldData)
+        ActorFrameData& actor, float time, const JPH::PhysicsSystem* physicsSystem, const WorldFrameData& worldData)
     {
+        const int collisionMask = actor.mCollisionMask;
+
         // Reset per-frame data
         actor.mWalkingOnWater = false;
         // Anything to collide with?
@@ -144,6 +260,7 @@ namespace MWPhysics
         // own) for compatibility with vanilla assets, we have to derive this from the vertical half extent instead of
         // from internal hull translation if not for this hack, the "correct" collision hull position would be
         // physicActor->getScaledMeshTranslation()
+        const osg::Vec3f previous = actor.mPosition;
         actor.mPosition.z() += actor.mHalfExtentsZ; // vanilla-accurate
 
         float swimlevel = actor.mSwimLevel + actor.mHalfExtentsZ;
@@ -151,6 +268,7 @@ namespace MWPhysics
         ActorTracer tracer;
 
         osg::Vec3f velocity;
+        osg::Vec3f slideSupportNormal;
 
         // Dead and paralyzed actors underwater will float to the surface,
         // if the CharacterController tells us to do so
@@ -164,6 +282,70 @@ namespace MWPhysics
                            * osg::Quat(actor.mRotation.y(), osg::Vec3f(0, 0, -1)))
                 * actor.mMovement;
         }
+        else if (actor.mKineticMovement)
+        {
+            // Desired input is rotated once. Persisted momentum stays in world space
+            // when the player looks around or releases the controls in mid-air.
+            osg::Vec3f wish = osg::Quat(actor.mRotation.y(), osg::Vec3f(0, 0, -1)) * actor.mMovement;
+            const float jump = wish.z();
+            wish.z() = 0.f;
+            const bool grounded = actor.mIsOnGround && !actor.mIsOnSlope;
+            osg::Vec3f& moving = actor.mLocomotionVelocity;
+            if (actor.mBrutalSliding && grounded && !actor.mInert && actor.mInertia.z() <= 0.f
+                && actor.mStuckFrames == 0)
+            {
+                // A close hull sweep proves support at this step, including after
+                // a relocation. Never use the long stair-down probe to add gravity
+                // along a distant surface or retain a slide in the air.
+                tracer.doTrace(actor.mPhysicsBody, actor.mPosition,
+                    actor.mPosition - osg::Vec3f(0, 0, 2.f * sGroundOffset), physicsSystem, collisionMask);
+                if (tracer.mFraction < 1.f && tracer.mHitObjectLayer != Layers::ACTOR && isWalkableSlope(tracer.mPlaneNormal))
+                    slideSupportNormal = tracer.mPlaneNormal;
+            }
+            if (grounded)
+            {
+                // Source CGameMovement::Friction, then Accelerate.
+                const float speed = moving.length();
+                if (speed > 0.f)
+                {
+                    // Rising out of a slide restores standing friction continuously.
+                    // Idle/crouching under a ceiling has no slide-friction blend.
+                    const float friction = PlayerKinetics::Friction
+                        + (PlayerKinetics::SlideFriction - PlayerKinetics::Friction) * actor.mBrutalSlideFrictionBlend;
+                    // Downhill gravity has a low terminal speed on shallow grades.
+                    // The ordinary stop-speed floor would artificially pin it there.
+                    const float control = isSlidingDownhill(moving, slideSupportNormal)
+                        ? speed : std::max(speed, PlayerKinetics::StopSpeed);
+                    const float drop = control * friction * time;
+                    moving *= std::max(speed - drop, 0.f) / speed;
+                }
+            }
+            if (slideSupportNormal.z() > 0.f)
+            {
+                const float gravityStep = Constants::GravityConst * Constants::UnitsPerMeter * time;
+                // Horizontal component of gravity rejected from the support normal.
+                moving.x() += gravityStep * slideSupportNormal.z() * slideSupportNormal.x();
+                moving.y() += gravityStep * slideSupportNormal.z() * slideSupportNormal.y();
+            }
+            float wishSpeed = wish.length();
+            if (wishSpeed > 0.f && !actor.mBrutalSliding)
+            {
+                const osg::Vec3f direction = wish / wishSpeed;
+                const float accelerate = grounded ? PlayerKinetics::Accelerate : PlayerKinetics::AirAccelerate;
+                const float target = grounded ? wishSpeed : std::min(wishSpeed, PlayerKinetics::AirWishCap);
+                const float add = target - moving * direction;
+                if (add > 0.f)
+                    moving += direction * std::min(accelerate * wishSpeed * time, add);
+            }
+            actor.mInertia.x() = actor.mInertia.y() = 0.f;
+            if (grounded && jump > 0.f && !actor.mBrutalSliding)
+                actor.mInertia.z() = jump;
+            velocity = actor.mLocomotionVelocity;
+            velocity.z() = actor.mInertia.z();
+            if (slideSupportNormal.z() > 0.f)
+                velocity.z() = -(velocity.x() * slideSupportNormal.x() + velocity.y() * slideSupportNormal.y())
+                    / slideSupportNormal.z();
+        }
         else
         {
             velocity = (osg::Quat(actor.mRotation.y(), osg::Vec3f(0, 0, -1))) * actor.mMovement;
@@ -175,16 +357,25 @@ namespace MWPhysics
                 velocity = velocity + actor.mInertia;
         }
 
+        velocity += actor.mExternalVelocity;
+        if (!actor.mKineticMovement || actor.mFlying || actor.mPosition.z() < swimlevel)
+            actor.mLocomotionVelocity = osg::Vec3f();
+
         // Now that we have the effective movement vector, apply wind forces to it
         if (worldData.mIsInStorm && velocity.length() > 0)
         {
-            const MWWorld::ESMStore& store = *MWBase::Environment::get().getESMStore();
-            const float fStromWalkMult = store.get<ESM::GameSetting>().find("fStromWalkMult")->mValue.getFloat();
-            const float angleCos = worldData.mStormDirection * velocity / velocity.length();
-            velocity *= 1.f + fStromWalkMult * angleCos;
+            osg::Vec3f stormDirection = worldData.mStormDirection;
+            float angleDegrees = osg::RadiansToDegrees(
+                std::acos(stormDirection * velocity / (stormDirection.length() * velocity.length())));
+            static const float fStromWalkMult = MWBase::Environment::get()
+                                                    .getESMStore()
+                                                    ->get<ESM::GameSetting>()
+                                                    .find("fStromWalkMult")
+                                                    ->mValue.getFloat();
+            velocity *= 1.f - (fStromWalkMult * (angleDegrees / 180.f));
         }
 
-        Stepper stepper(collisionWorld, actor.mCollisionObject);
+        Stepper stepper(physicsSystem, actor.mPhysicsBody);
         osg::Vec3f origVelocity = velocity;
         osg::Vec3f newPosition = actor.mPosition;
         /*
@@ -216,7 +407,8 @@ namespace MWPhysics
             if ((newPosition - nextpos).length2() > 0.0001)
             {
                 // trace to where character would go if there were no obstructions
-                tracer.doTrace(actor.mCollisionObject, newPosition, nextpos, collisionWorld, actor.mIsOnGround);
+                tracer.doTrace(
+                    actor.mPhysicsBody, newPosition, nextpos, physicsSystem, collisionMask, actor.mIsOnGround);
 
                 // check for obstructions
                 if (tracer.mFraction >= 1.0f)
@@ -228,11 +420,7 @@ namespace MWPhysics
             else
             {
                 // The current position and next position are nearly the same, so just exit.
-                // Note: Bullet can trigger an assert in debug modes if the positions
-                // are the same, since that causes it to attempt to normalize a zero
-                // length vector (which can also happen with nearly identical vectors, since
-                // precision can be lost due to any math Bullet does internally). Since we
-                // aren't performing any collision detection, we want to reject the next
+                // Since we aren't performing any collision detection, we want to reject the next
                 // position, so that we don't slowly move inside another object.
                 break;
             }
@@ -244,19 +432,46 @@ namespace MWPhysics
             float hitHeight = tracer.mHitPoint.z() - tracer.mEndPos.z() + actor.mHalfExtentsZ;
             osg::Vec3f oldPosition = newPosition;
             bool usedStepLogic = false;
-            if (!isActor(tracer.mHitObject))
+
+            // Push dynamic objects when we collide with them
+            if (!tracer.mHitBodyID.IsInvalid() && isDynamicObjectLayer(tracer.mHitObjectLayer))
+            {
+                // Use a default actor mass for pushing (could be made configurable)
+                constexpr float defaultActorMass = 80.0f;
+                pushDynamicObject(tracer.mHitBodyID, tracer.mHitObjectLayer, velocity, defaultActorMass, physicsSystem);
+            }
+
+            // Check if we hit an actor (use layer since we only have BodyID now)
+            bool hitActor = (tracer.mHitObjectLayer == Layers::ACTOR);
+            if (!hitActor)
             {
                 if (hitHeight < Constants::sStepSizeUp)
                 {
                     // Try to step up onto it.
                     // NOTE: this modifies newPosition and velocity on its own if successful
-                    usedStepLogic = stepper.step(newPosition, velocity, remainingTime, seenGround, iterations == 0);
+                    usedStepLogic = stepper.step(
+                        newPosition, velocity, remainingTime, seenGround, iterations == 0, collisionMask);
                 }
-                auto* ptrHolder = static_cast<PtrHolder*>(tracer.mHitObject->getUserPointer());
-                if (Object* hitObject = dynamic_cast<Object*>(ptrHolder))
+
+                if (tracer.mHitObjectLayer != Layers::WATER && tracer.mHitObjectLayer != Layers::DYNAMIC_WORLD)
                 {
-                    hitObject->addCollision(
-                        actor.mIsPlayer ? ScriptedCollisionType_Player : ScriptedCollisionType_Actor);
+                    // For static objects, we need to record script collisions
+                    JPH::BodyLockRead lock(physicsSystem->GetBodyLockInterface(), tracer.mHitBodyID);
+                    if (lock.Succeeded())
+                    {
+                        const JPH::Body& body = lock.GetBody();
+                        // Check UserData is non-zero before converting (it's set to 0 when object is being destroyed)
+                        uintptr_t userData = body.GetUserData();
+                        if (userData != 0)
+                        {
+                            Object* hitObject = Misc::Convert::toPointerFromUserData<Object>(userData);
+                            if (hitObject != nullptr)
+                            {
+                                hitObject->addCollision(
+                                    actor.mIsPlayer ? ScriptedCollisionType_Player : ScriptedCollisionType_Actor);
+                            }
+                        }
+                    }
                 }
             }
             if (usedStepLogic)
@@ -274,6 +489,32 @@ namespace MWPhysics
                 auto planeNormal = tracer.mPlaneNormal;
                 // need to know the unadjusted normal to handle certain types of seams properly
                 const auto origPlaneNormal = planeNormal;
+                // Report only the velocity contributed by the external channel,
+                // and only a blocking non-walkable contact (successful stair steps
+                // take the other branch). Keep the strongest contact per frame.
+                const float closingSpeed = -(actor.mExternalVelocity * origPlaneNormal);
+                if (!isWalkableSlope(origPlaneNormal) && closingSpeed > actor.mExternalImpactSpeed)
+                {
+                    actor.mExternalImpactSpeed = closingSpeed;
+                    actor.mExternalImpactPosition = tracer.mHitPoint;
+                    actor.mExternalImpactNormal = origPlaneNormal;
+                    actor.mExternalImpactObject = tracer.mHitBodyID;
+                }
+                if (!isWalkableSlope(origPlaneNormal) && closingSpeed > 0.f)
+                {
+                    actor.mExternalVelocity = reject(actor.mExternalVelocity, origPlaneNormal);
+                    if (!actor.mFlying && !underwater)
+                        actor.mExternalVelocity.z() = 0.f;
+                }
+
+
+                if (actor.mKineticMovement && !isWalkableSlope(planeNormal))
+                {
+                    osg::Vec3f normal(planeNormal.x(), planeNormal.y(), 0.f);
+                    if (normal.normalize() > .001f && actor.mLocomotionVelocity * normal < 0.f)
+                        actor.mLocomotionVelocity = reject(actor.mLocomotionVelocity, normal);
+                }
+
 
                 // If we touched the ground this frame, and whatever we ran into is a wall of some sort,
                 // pretend that its collision normal is pointing horizontally
@@ -326,8 +567,8 @@ namespace MWPhysics
                             // version of surface rejection for acute crevices/seams
                             auto averageNormal = bestNormal + origPlaneNormal;
                             averageNormal.normalize();
-                            tracer.doTrace(actor.mCollisionObject, newPosition,
-                                newPosition + averageNormal * (sCollisionMargin * 2.0), collisionWorld);
+                            tracer.doTrace(actor.mPhysicsBody, newPosition,
+                                newPosition + averageNormal * (sCollisionMargin * 2.0), physicsSystem, collisionMask);
                             newPosition = (newPosition + tracer.mEndPos) / 2.0;
 
                             usedSeamLogic = true;
@@ -342,8 +583,8 @@ namespace MWPhysics
                 // margin is along the movement path, but this is along the collision normal
                 if (!usedSeamLogic)
                 {
-                    tracer.doTrace(actor.mCollisionObject, newPosition,
-                        newPosition + planeNormal * (sCollisionMargin * 2.0), collisionWorld);
+                    tracer.doTrace(actor.mPhysicsBody, newPosition,
+                        newPosition + planeNormal * (sCollisionMargin * 2.0), physicsSystem, collisionMask);
                     newPosition = (newPosition + tracer.mEndPos) / 2.0;
                 }
 
@@ -375,33 +616,40 @@ namespace MWPhysics
             }
         }
 
+        const osg::Vec3f beforeGroundCorrection = newPosition;
+        osg::Vec3f groundNormal, groundPoint;
+        bool closeSlideSupport = false;
         bool isOnGround = false;
         bool isOnSlope = false;
         if (forceGroundTest || (actor.mInertia.z() <= 0.f && newPosition.z() >= swimlevel))
         {
-            osg::Vec3f from = newPosition;
             auto dropDistance = 2 * sGroundOffset + (actor.mIsOnGround ? sStepSizeDown : 0);
             osg::Vec3f to = newPosition - osg::Vec3f(0, 0, dropDistance);
-            tracer.doTrace(actor.mCollisionObject, from, to, collisionWorld, actor.mIsOnGround);
+            tracer.doTrace(actor.mPhysicsBody, newPosition, to, physicsSystem, collisionMask, actor.mIsOnGround);
             if (tracer.mFraction < 1.0f)
             {
-                if (!isActor(tracer.mHitObject))
+                // Check if we hit an actor using the layer
+                bool groundIsActor = (tracer.mHitObjectLayer == Layers::ACTOR);
+                if (!groundIsActor)
                 {
                     isOnGround = true;
                     isOnSlope = !isWalkableSlope(tracer.mPlaneNormal);
-                    actor.mStandingOn = tracer.mHitObject;
+                    actor.mStandingOn = tracer.mHitBodyID;
 
-                    if (actor.mStandingOn->getBroadphaseHandle()->m_collisionFilterGroup == CollisionType_Water)
+                    if (tracer.mHitObjectLayer == Layers::WATER)
                         actor.mWalkingOnWater = true;
                     if (!actor.mFlying && !isOnSlope)
                     {
+                        groundNormal = tracer.mPlaneNormal;
+                        groundPoint = tracer.mHitPoint;
+                        closeSlideSupport = tracer.mFraction * dropDistance <= 2.f * sGroundOffset;
                         if (tracer.mFraction * dropDistance > sGroundOffset)
                             newPosition.z() = tracer.mEndPos.z() + sGroundOffset;
                         else
                         {
                             newPosition.z() = tracer.mEndPos.z();
-                            tracer.doTrace(actor.mCollisionObject, newPosition,
-                                newPosition + osg::Vec3f(0, 0, 2 * sGroundOffset), collisionWorld);
+                            tracer.doTrace(actor.mPhysicsBody, newPosition,
+                                newPosition + osg::Vec3f(0, 0, 2 * sGroundOffset), physicsSystem, collisionMask);
                             newPosition = (newPosition + tracer.mEndPos) / 2.0;
                         }
                     }
@@ -444,42 +692,29 @@ namespace MWPhysics
         actor.mPosition = newPosition;
         // remove what was added earlier in compensating for doTrace not taking interior transformation into account
         actor.mPosition.z() -= actor.mHalfExtentsZ; // vanilla-accurate
+        if (time > 0.f) actor.mSimulationVelocity = (actor.mPosition - previous - (newPosition - beforeGroundCorrection)) / time;
+        if ((actor.mBrutalSliding || actor.mBrutalSlideLow) && closeSlideSupport && isOnGround && !isOnSlope
+            && !actor.mInert && actor.mStuckFrames == 0 && newPosition.z() >= swimlevel)
+        {
+            actor.mBrutalSlideGroundNormal = groundNormal;
+            actor.mBrutalSlideGroundPoint = groundPoint;
+            actor.mBrutalSlideDownhill = actor.mBrutalSliding && isSlidingDownhill(actor.mSimulationVelocity,groundNormal);
+        }
+        if (isOnGround && !isOnSlope)
+        {
+            const float speed = actor.mExternalVelocity.length();
+            if (speed > 0.f) actor.mExternalVelocity *= std::max(0.f, 1.f - 850.f * time / speed);
+        }
     }
 
-    void MovementSolver::move(ProjectileFrameData& projectile, float time, const btCollisionWorld* collisionWorld)
+    JPH::Vec3 addMarginToDelta(JPH::Vec3 delta)
     {
-        btVector3 btFrom = Misc::Convert::toBullet(projectile.mPosition);
-        btVector3 btTo = Misc::Convert::toBullet(projectile.mPosition + projectile.mMovement * time);
-
-        if (btFrom == btTo)
-            return;
-
-        assert(projectile.mProjectile != nullptr);
-
-        ProjectileConvexCallback resultCallback(
-            projectile.mCaster, projectile.mCollisionObject, btFrom, btTo, *projectile.mProjectile);
-        resultCallback.m_collisionFilterMask = CollisionType_AnyPhysical;
-        resultCallback.m_collisionFilterGroup = CollisionType_Projectile;
-
-        const btQuaternion btrot = btQuaternion::getIdentity();
-
-        const btCollisionShape* shape = projectile.mCollisionObject->getCollisionShape();
-        assert(shape->isConvex());
-        collisionWorld->convexSweepTest(static_cast<const btConvexShape*>(shape), btTransform(btrot, btFrom),
-            btTransform(btrot, btTo), resultCallback);
-
-        projectile.mPosition
-            = Misc::Convert::toOsg(projectile.mProjectile->isActive() ? btTo : resultCallback.m_hitPointWorld);
-    }
-
-    btVector3 addMarginToDelta(btVector3 delta)
-    {
-        if (delta.length2() == 0.0)
+        if (delta.LengthSq() == 0.0)
             return delta;
-        return delta + delta.normalized() * sCollisionMargin;
+        return delta + delta.Normalized() * sCollisionMargin;
     }
 
-    void MovementSolver::unstuck(ActorFrameData& actor, const btCollisionWorld* collisionWorld)
+    void MovementSolver::unstuck(ActorFrameData& actor, JPH::PhysicsSystem* physicsSystem)
     {
         if (actor.mSkipCollisionDetection) // noclipping/tcl
             return;
@@ -517,66 +752,105 @@ namespace MWPhysics
         // we need to replicate part of the collision box's transform process from scratch
         osg::Vec3f refPosition = tempPosition + verticalHalfExtent;
         osg::Vec3f goodPosition = refPosition;
-        const btTransform oldTransform = actor.mCollisionObject->getWorldTransform();
-        btTransform newTransform = oldTransform;
 
-        auto gatherContacts = [&](btVector3 newOffset) -> ContactCollectionCallback {
-            goodPosition = refPosition + Misc::Convert::toOsg(addMarginToDelta(newOffset));
-            newTransform.setOrigin(Misc::Convert::toBullet(goodPosition));
-            actor.mCollisionObject->setWorldTransform(newTransform);
-
-            ContactCollectionCallback callback(*actor.mCollisionObject, velocity);
-            ContactTestWrapper::contactTest(
-                const_cast<btCollisionWorld*>(collisionWorld), actor.mCollisionObject, callback);
-            return callback;
-        };
-
-        // check whether we're inside the world with our collision box with manually-derived offset
-        auto contactCallback = gatherContacts({ 0.0, 0.0, 0.0 });
-        if (contactCallback.mDistance < -sAllowedPenetration)
+        JPH::BodyLockRead lock(physicsSystem->GetBodyLockInterface(), actor.mPhysicsBody);
+        if (lock.Succeeded())
         {
-            ++actor.mStuckFrames;
-            actor.mLastStuckPosition = actor.mPosition;
-            // we are; try moving it out of the world
-            auto positionDelta = contactCallback.mContactSum;
-            // limit rejection delta to the largest known individual rejections
-            if (std::abs(positionDelta.x()) > contactCallback.mMaxX)
-                positionDelta *= contactCallback.mMaxX / std::abs(positionDelta.x());
-            if (std::abs(positionDelta.y()) > contactCallback.mMaxY)
-                positionDelta *= contactCallback.mMaxY / std::abs(positionDelta.y());
-            if (std::abs(positionDelta.z()) > contactCallback.mMaxZ)
-                positionDelta *= contactCallback.mMaxZ / std::abs(positionDelta.z());
+            const JPH::Body& actorBody = lock.GetBody();
+            const JPH::ShapeRefC shape = actorBody.GetShape();
+            const JPH::RMat44& trans = actorBody.GetWorldTransform();
 
-            auto contactCallback2 = gatherContacts(positionDelta);
-            // successfully moved further out from contact (does not have to be in open space, just less inside of
-            // things)
-            if (contactCallback2.mDistance > contactCallback.mDistance)
-                tempPosition = goodPosition - verticalHalfExtent;
-            // try again but only upwards (fixes some bad coc floors)
-            else
+            JPH::RMat44 oldTransformJolt(trans);
+            JPH::RMat44 newTransformJolt(oldTransformJolt);
+            const JPH::Vec3 scale = JPH::Vec3::sReplicate(1.0f);
+
+            // Create a mask that is same of the actor minus projectiles and other actors
+            int collisionMask = actor.mCollisionMask;
+            collisionMask = collisionMask & ~Layers::PROJECTILE;
+            collisionMask = collisionMask & ~Layers::ACTOR;
+
+            // Filter out layers
+            JPH::DefaultBroadPhaseLayerFilter broadphaseLayerFilter
+                = physicsSystem->GetDefaultBroadPhaseLayerFilter(Layers::ACTOR);
+            MaskedObjectLayerFilter objectLayerFilter(collisionMask);
+            lock.ReleaseLock();
+
+            JPH::BodyInterface& bodyInterface = physicsSystem->GetBodyInterface();
+
+            auto gatherContacts = [&](JPH::Vec3 newOffset) -> ContactCollectionCallback {
+                goodPosition = refPosition + Misc::Convert::toOsg(addMarginToDelta(newOffset));
+                newTransformJolt.SetTranslation(Misc::Convert::toJolt<JPH::RVec3>(goodPosition));
+                bodyInterface.SetPosition(
+                    actor.mPhysicsBody, newTransformJolt.GetTranslation(), JPH::EActivation::Activate);
+
+                // Collide with all edges, dont collect face data and ignore backfaces
+                JPH::CollideShapeSettings settings;
+                settings.mActiveEdgeMode = JPH::EActiveEdgeMode::CollideWithAll;
+                settings.mBackFaceMode = JPH::EBackFaceMode::IgnoreBackFaces;
+                settings.mCollectFacesMode = JPH::ECollectFacesMode::NoFaces;
+
+                // Ignore actors own body
+                JPH::IgnoreSingleBodyFilter bodyFilter(actor.mPhysicsBody);
+
+                // Query against actor shape
+                ContactCollectionCallback ioCollector(velocity);
+                physicsSystem->GetNarrowPhaseQuery().CollideShape(shape, scale, newTransformJolt, settings,
+                    JPH::RVec3::sZero(), ioCollector, broadphaseLayerFilter, objectLayerFilter, bodyFilter);
+                return ioCollector;
+            };
+
+            // check whether we're inside the world with our collision box with manually-derived offset
+            auto contactCallback = gatherContacts({ 0.0, 0.0, 0.0 });
+            if (contactCallback.mDistance < -sAllowedPenetration)
             {
-                // upwards-only offset
-                auto contactCallback3 = gatherContacts({ 0.0, 0.0, std::abs(positionDelta.z()) });
-                // success
-                if (contactCallback3.mDistance > contactCallback.mDistance)
+                ++actor.mStuckFrames;
+                actor.mLastStuckPosition = actor.mPosition;
+                // we are; try moving it out of the world
+                auto positionDelta = contactCallback.mContactSum;
+                // limit rejection delta to the largest known individual rejections
+                if (std::abs(positionDelta.GetX()) > contactCallback.mMaxX)
+                    positionDelta *= contactCallback.mMaxX / std::abs(positionDelta.GetX());
+                if (std::abs(positionDelta.GetY()) > contactCallback.mMaxY)
+                    positionDelta *= contactCallback.mMaxY / std::abs(positionDelta.GetY());
+                if (std::abs(positionDelta.GetZ()) > contactCallback.mMaxZ)
+                    positionDelta *= contactCallback.mMaxZ / std::abs(positionDelta.GetZ());
+
+                auto contactCallback2 = gatherContacts(positionDelta);
+                // successfully moved further out from contact (does not have to be in open space, just less inside of
+                // things)
+                if (contactCallback2.mDistance > contactCallback.mDistance)
                     tempPosition = goodPosition - verticalHalfExtent;
+                // try again but only upwards (fixes some bad coc floors)
                 else
-                // try again but fixed distance up
                 {
-                    auto contactCallback4 = gatherContacts({ 0.0, 0.0, 10.0 });
+                    // upwards-only offset
+                    auto contactCallback3 = gatherContacts({ 0.0, 0.0, std::abs(positionDelta.GetZ()) });
                     // success
-                    if (contactCallback4.mDistance > contactCallback.mDistance)
+                    if (contactCallback3.mDistance > contactCallback.mDistance)
                         tempPosition = goodPosition - verticalHalfExtent;
+                    else
+                    // try again but fixed distance up
+                    {
+                        auto contactCallback4 = gatherContacts({ 0.0, 0.0, 10.0 });
+                        // success
+                        if (contactCallback4.mDistance > contactCallback.mDistance)
+                            tempPosition = goodPosition - verticalHalfExtent;
+                    }
                 }
             }
+            else
+            {
+                actor.mStuckFrames = 0;
+                actor.mLastStuckPosition = { 0, 0, 0 };
+            }
+
+            bodyInterface.SetPosition(
+                actor.mPhysicsBody, oldTransformJolt.GetTranslation(), JPH::EActivation::Activate);
+            actor.mPosition = tempPosition;
         }
         else
         {
-            actor.mStuckFrames = 0;
-            actor.mLastStuckPosition = { 0, 0, 0 };
+            assert(false);
         }
-
-        actor.mCollisionObject->setWorldTransform(oldTransform);
-        actor.mPosition = tempPosition;
     }
 }
