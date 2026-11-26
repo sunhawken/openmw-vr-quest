@@ -535,6 +535,10 @@ ExternalProject_Get_Property(host-icu BINARY_DIR)
 set(host_icu_build_dir ${BINARY_DIR})
 
 set(OPENMW_COMMON
+	# try_run() cannot execute on the build host when cross-compiling. LuaJIT on arm64 is always GC64,
+	# so its custom allocator works; preset the check's result.
+	-DRUN_RESULT_VAR=0
+	-DRUN_RESULT_VAR__TRYRUN_OUTPUT=
 	-DBUILD_BSATOOL=0
 	-DBUILD_NIFTEST=0
 	-DBUILD_ESMTOOL=0
